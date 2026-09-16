@@ -13,4 +13,4 @@ prints the command in full for exactly that reason -- you should be able to
 read what this will run before you let it run.
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"

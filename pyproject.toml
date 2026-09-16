@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "gensyn-audit"
-version = "1.0.0"
+version = "1.1.0"
 description = "Independently replay and verify Gensyn Open 1B training steps."
 readme = "README.md"
 requires-python = ">=3.11,<3.12"
