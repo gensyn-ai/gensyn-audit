@@ -90,6 +90,7 @@ def write_handoff(
     safetensors: int | None = None,
     step: int = 200,
     omit: tuple[str, ...] = (),
+    state_hash: dict | None = None,
 ) -> Path:
     """A COMPLETE hand-off, in the shape `audit_replay --save-checkpoint-dir`
     writes one: the DCP checkpoint, the per-rank batch-hasher chains, and the
@@ -98,19 +99,30 @@ def write_handoff(
     `omit` drops members, for the tests that check an incomplete hand-off is
     refused rather than sent. `safetensors` adds the single-file bundle the
     record's intake takes today, which the converter does not yet produce.
+    `state_hash` records the run's `train.state_hash` block in meta.json's
+    `config_resolved` and, like the writer, exports the gradients and the rank
+    chains only when it says the hash folds them in.
     """
     d.mkdir(parents=True, exist_ok=True)
     (d / "dcp").mkdir(exist_ok=True)
     (d / "dcp" / "__0_0.distcp").write_bytes(b"shard")
+    meta: dict = {"step": step, "dp_world_size": world, "chained_hash": "a" * 64}
+    grads = chains = True
+    if state_hash is not None:
+        meta["config_resolved"] = json.dumps({"train": {"state_hash": state_hash}})
+        hashed = state_hash.get("every_n_steps", 1) > 0
+        grads = hashed and state_hash.get("include_grads", True)
+        chains = hashed and state_hash.get("include_batch", True)
     files = {
-        "meta.json": json.dumps({"step": step, "dp_world_size": world, "chained_hash": "a" * 64}),
+        "meta.json": json.dumps(meta),
         "_COMPLETE": "",
         "state_hash.txt": "a" * 64 + "\n",
         "global_stream.json": "{}",
         "rng.rank_0.pt": "rng",
-        "gradients.safetensors": "grads",
     }
-    for r in range(world):
+    if grads:
+        files["gradients.safetensors"] = "grads"
+    for r in range(world if chains else 0):
         files[f"batch_hasher.rank_{r}.bin"] = "chain" + str(r)
     for name, body in files.items():
         if name not in omit:

@@ -6,10 +6,11 @@ in chunks, and a resumed upload asks where the last one stopped rather than
 starting over. Losing a day's replay to a dropped Wi-Fi connection at the last
 hop would be the single most demoralising failure this tool could have.
 
-What must travel is the COMPLETE hand-off (see `handoff.py`): the checkpoint,
-every rank's batch-hasher chain, and `gradients.safetensors`. A recipient
-without those can load the state but cannot reconstruct the hash the run
-published for it, which is the whole point of handing it over. So this module
+What must travel is the COMPLETE hand-off (see `handoff.py`): the checkpoint
+and, when the run's state hash folds them in, every rank's batch-hasher chain
+and `gradients.safetensors`. A recipient without those can load the state but
+cannot reconstruct the hash the run published for it, which is the whole point
+of handing it over. So this module
 refuses to send a partial hand-off rather than putting one in intake that the
 next auditor will have to trust on the uploader's word.
 

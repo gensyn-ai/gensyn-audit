@@ -279,6 +279,18 @@ def test_an_incomplete_handoff_is_not_uploaded(tmp_path, dropped):
     assert dropped in exc.value.hint
 
 
+def test_a_handoff_without_what_its_run_did_not_hash_is_uploaded(tmp_path):
+    """open-8b hashes neither the gradients nor the batch: its writer exports
+    neither, and the uploader must not demand them."""
+    from conftest import write_handoff
+
+    sh = {"every_n_steps": 1, "include_grads": False, "include_batch": False}
+    d = write_handoff(tmp_path / "handoff", world=48, safetensors=1000, state_hash=sh)
+    assert not (d / "gradients.safetensors").exists()
+    bundle = uploadmod.build_bundle(d, tmp_path)
+    assert bundle.path == d / "handoff.safetensors" and bundle.size == 1000
+
+
 def test_upload_accepts_the_packed_file_named_in_the_receipt(tmp_path):
     src = _handoff(tmp_path)
     path = src / "handoff.safetensors"
