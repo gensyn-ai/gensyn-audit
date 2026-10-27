@@ -440,14 +440,14 @@ def test_a_landed_submit_is_remembered_and_not_repeated(tmp_path, monkeypatch):
 
     cli, plan, state, result, rec, outcome, calls = _flow(tmp_path, monkeypatch, submit)
     cli._submit_and_upload(plan, state, result, rec, outcome)
-    assert calls["submit"] == [state.claim] and calls["ticket"] == ["sub_1"]
+    assert calls["submit"] == [state.claim] and calls["ticket"] == ["sub_1"] * 2
     saved = runner.load_state(plan.workdir)
     assert (saved.submission_id, saved.submitted_with) == ("sub_1", state.claim)
 
     # The connection dropped after that; the auditor re-runs.
     cli._submit_and_upload(plan, saved, result, rec, outcome)
     assert calls["submit"] == [state.claim], "no second POST with a spent token"
-    assert calls["ticket"] == ["sub_1", "sub_1"] and len(calls["send"]) == 2
+    assert calls["ticket"] == ["sub_1"] * 4 and len(calls["send"]) == 2
 
 
 def test_session_is_forgotten_only_after_the_sidecar_lands(tmp_path, monkeypatch):
@@ -488,7 +488,30 @@ def test_a_new_claim_submits_again_rather_than_reusing_an_old_submission(tmp_pat
     cli, plan, state, result, rec, outcome, calls = _flow(tmp_path, monkeypatch, submit)
     state.submission_id, state.submitted_with = "sub_old", "clm_" + "0" * 64
     cli._submit_and_upload(plan, state, result, rec, outcome)
-    assert calls["submit"] == [state.claim] and calls["ticket"] == ["sub_1"]
+    assert calls["submit"] == [state.claim] and calls["ticket"] == ["sub_1"] * 2
+
+
+def test_the_sidecar_is_signed_after_the_bundle_lands(tmp_path, monkeypatch):
+    """Both URLs are signed for an hour. An 8B bundle can take longer than that
+    to upload, so the sidecar must use a ticket fetched after the bundle."""
+    from gensyn_audit import record as recordmod
+
+    def submit(claim):
+        return recordmod.SubmitResponse(
+            "pending-verification", "sub_1", None, "", upload_required=True
+        )
+
+    cli, plan, state, result, rec, outcome, _calls = _flow(tmp_path, monkeypatch, submit)
+    order = []
+    monkeypatch.setattr(uploadmod, "send", lambda *a, **k: order.append("send"))
+    monkeypatch.setattr(uploadmod, "send_sidecar", lambda p, t: order.append(("sidecar", t)))
+    tickets = iter(["https://x/stale", "https://x/fresh"])
+    rec.upload_ticket = lambda *a, **k: (
+        order.append("ticket") or UploadTicket(signed_url="https://x/b", sidecar_url=next(tickets))
+    )
+    cli._submit_and_upload(plan, state, result, rec, outcome)
+    assert order[:3] == ["ticket", "send", "ticket"]
+    assert order[3][1].sidecar_url == "https://x/fresh"
 
 
 def test_upload_accepts_the_submission_id_the_record_returned():
