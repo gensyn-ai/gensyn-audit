@@ -418,19 +418,29 @@ def _check_kit(kit: Kit, venv: Path, device: str) -> list[Check]:
 
 
 def _check_torch(python: Path, kit: Kit, device: str) -> Check:
-    have = kitmod.installed_torch(python)
+    try:
+        have = kitmod.installed_torch(python)
+    except (OSError, subprocess.TimeoutExpired):
+        have = None
     if have is None:
         return Check(
             "torch", FAIL, "not importable", fix=f"Delete {python.parent.parent} and re-run."
         )
-    want = kit.torch_requirement.split("==", 1)[-1] if kit.torch_requirement else None
-    if want and have != want:
+    tag = "macosx" if sys.platform == "darwin" else "linux"
+    if not kitmod.torch_matches(have, kit.torch_requirement, tag):
         return Check(
-            "torch", FAIL, have, note=f"kit pins {want}", fix="Delete the audit venv and re-run."
+            "torch",
+            FAIL,
+            have,
+            note=f"kit pins {kit.torch_requirement.split('==', 1)[-1]}",
+            fix="Delete the audit venv and re-run.",
         )
     cuda = re.search(r"\+cu(\d\d)", have)
     if device == "cuda" and cuda:
-        smi = _run(["nvidia-smi"], timeout=15) if shutil.which("nvidia-smi") else None
+        try:
+            smi = _run(["nvidia-smi"], timeout=15) if shutil.which("nvidia-smi") else None
+        except (OSError, subprocess.TimeoutExpired):
+            smi = None
         driver = re.search(r"CUDA Version:\s*(\d+)", smi.stdout) if smi else None
         if driver and int(driver[1]) < int(cuda[1]):
             return Check(

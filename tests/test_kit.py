@@ -493,3 +493,40 @@ def test_provision_refuses_a_torch_that_is_not_the_pin(monkeypatch, tmp_path):
     with pytest.raises(AuditError, match="torch 2.12.1\\+cu130"):
         kitmod.provision(kit, tmp_path / "venv", {}, platform_tag="linux")
     assert "torch==2.12.1+cu132" in calls[1] and "--index-url" in calls[1]
+
+
+def _provision_with_torch(monkeypatch, tmp_path, kit, installed, tag):
+    from gensyn_audit import kit as kitmod
+
+    calls = []
+
+    def fake_run(argv, **kw):
+        calls.append(argv)
+        return type("P", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    monkeypatch.setattr(kitmod.subprocess, "run", fake_run)
+    monkeypatch.setattr(kitmod, "_base_interpreter", lambda: "python3")
+    monkeypatch.setattr(kitmod, "installed_torch", lambda python: installed)
+    monkeypatch.setattr(K.Kit, "wheels_in_install_order", lambda self, t: ())
+    kitmod.provision(kit, tmp_path / "venv", {}, platform_tag=tag)
+    return calls
+
+
+def test_format_1_public_pin_accepts_a_local_cuda_build(monkeypatch, tmp_path):
+    kit = replace(_load(monkeypatch, _kit_doc(kit_format=1)), torch_requirement="torch==2.12.1")
+    _provision_with_torch(monkeypatch, tmp_path, kit, "2.12.1+cu130", "linux")
+
+
+def test_format_2_on_macos_skips_the_index_and_checks_public_version(monkeypatch, tmp_path):
+    kit = replace(
+        _load(monkeypatch, _kit_doc(kit_format=1)),
+        torch_requirement="torch==2.12.1+cu132",
+        torch_index_url="https://download.pytorch.org/whl/cu132",
+    )
+    calls = _provision_with_torch(monkeypatch, tmp_path, kit, "2.12.1", "macosx")
+    assert not any("--index-url" in c for c in calls)
+
+
+def test_load_kit_rejects_a_malformed_torch_requirement(monkeypatch):
+    with pytest.raises(AuditError, match="not torch==X"):
+        _load(monkeypatch, _kit_doc(kit_format=1, torch_requirement="torch>=2.12"))

@@ -43,6 +43,7 @@ from pathlib import Path
 from .errors import AuditError
 
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
+TORCH_PIN = re.compile(r"torch==[0-9][a-zA-Z0-9.+!-]*")
 
 #: repop wheels are built per CPython minor; the published ones are cp311.
 REQUIRED_PYTHON = (3, 11)
@@ -361,6 +362,8 @@ def load_kit(prefix: str) -> Kit:
 
     torch_req = str(doc.get("torch_requirement", "")) or None
     torch_index = str(doc.get("torch_index_url", "")).rstrip("/") or None
+    if torch_req and not TORCH_PIN.fullmatch(torch_req):
+        raise AuditError(f"kit at {prefix}: torch_requirement is not torch==X ({torch_req!r}).")
     if fmt >= 2 and not (torch_req and torch_index):
         raise AuditError(
             f"kit at {prefix}: kit_format 2 needs torch_requirement and torch_index_url."
@@ -562,6 +565,7 @@ def provision(
             info
             and info.get("commit") == kit.repop_commit
             and replay_entrypoint(venv_dir).is_file()
+            and torch_matches(installed_torch(python), kit.torch_requirement, platform_tag)
         ):
             if on_step:
                 on_step("venv already provisioned for this kit")
@@ -584,8 +588,11 @@ def provision(
 
     # Name the exact torch build before repop: its wheel pins only the public
     # version, so pip would otherwise take PyPI's default CUDA build.
+    # The index carries Linux CUDA builds only; macOS takes its own torch.
     installs = (
-        [[kit.torch_requirement, "--index-url", kit.torch_index_url]] if kit.torch_index_url else []
+        [[kit.torch_requirement, "--index-url", kit.torch_index_url]]
+        if kit.torch_index_url and platform_tag == "linux"
+        else []
     )
     installs += [[str(staged[w.name])] for w in wheels]
     for args in installs:
@@ -605,14 +612,30 @@ def provision(
             )
     if kit.torch_requirement:
         have = installed_torch(python)
-        want = kit.torch_requirement.split("==", 1)[-1]
-        if have != want:
+        if not torch_matches(have, kit.torch_requirement, platform_tag):
             raise AuditError(
-                f"the audit venv has torch {have}, and the kit pins {want}.",
+                f"the audit venv has torch {have}, and the kit pins "
+                f"{kit.torch_requirement.split('==', 1)[-1]}.",
                 hint="A different torch build runs different CUDA kernels, so a replay "
                 f"on it proves nothing. Delete {venv_dir} and re-run.",
             )
     return python
+
+
+def torch_matches(have: str | None, requirement: str | None, platform_tag: str) -> bool:
+    """Exact match when the pin names a local build on Linux; else the public version.
+
+    Older kits pin ``torch==X`` while Linux pip installs ``X+cuNNN``, and macOS
+    torch never carries a local tag.
+    """
+    if not requirement:
+        return True
+    if have is None:
+        return False
+    want = requirement.split("==", 1)[-1]
+    if "+" in want and platform_tag == "linux":
+        return have == want
+    return have.split("+", 1)[0] == want.split("+", 1)[0]
 
 
 def installed_torch(python: Path) -> str | None:
