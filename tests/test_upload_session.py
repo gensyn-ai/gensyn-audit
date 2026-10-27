@@ -514,6 +514,28 @@ def test_the_sidecar_is_signed_after_the_bundle_lands(tmp_path, monkeypatch):
     assert order[3][1].sidecar_url == "https://x/fresh"
 
 
+def test_a_sidecar_re_signed_for_another_object_fails_loudly(tmp_path, monkeypatch):
+    """The sidecar only means something beside the bundle that just landed."""
+    from gensyn_audit import record as recordmod
+
+    def submit(claim):
+        return recordmod.SubmitResponse(
+            "pending-verification", "sub_1", None, "", upload_required=True
+        )
+
+    cli, plan, state, result, rec, outcome, _calls = _flow(tmp_path, monkeypatch, submit)
+    sent = []
+    monkeypatch.setattr(uploadmod, "send", lambda *a, **k: None)
+    monkeypatch.setattr(uploadmod, "send_sidecar", lambda p, t: sent.append(t))
+    objects = iter(["gs://b/one", "gs://b/two"])
+    rec.upload_ticket = lambda *a, **k: UploadTicket(
+        signed_url="https://x/b", sidecar_url="https://x/s", object_uri=next(objects)
+    )
+    with pytest.raises(AuditError, match="different object"):
+        cli._submit_and_upload(plan, state, result, rec, outcome)
+    assert sent == []
+
+
 def test_upload_accepts_the_submission_id_the_record_returned():
     """For a result an older build submitted without remembering the id."""
     from gensyn_audit import cli
