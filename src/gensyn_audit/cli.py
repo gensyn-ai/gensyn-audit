@@ -85,6 +85,8 @@ def _resolve_kit(args: argparse.Namespace, manifest=None) -> tuple[kitmod.Kit, k
             "  gensyn-audit run --manifest <url>          # names the kit, record and roots\n"
             "  gensyn-audit run --kit <prefix>            # the kit directly",
         )
+    # An explicit --kit gs:// is read via ADC and, deliberately, cited as that
+    # gs:// prefix in receipts; a manifest-named gs:// kit still uses its mirror.
     k = kitmod.load_kit(prefix, mirror=not (args.kit or "").startswith("gs://"))
     return k, kitmod.load_trajectory(k)
 

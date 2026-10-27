@@ -461,6 +461,22 @@ def test_an_explicit_gs_kit_stays_on_gs(monkeypatch):
     assert k.public_prefix == "gs://b/audit-kit/k"
 
 
+@pytest.mark.parametrize(
+    ("kit_arg", "expected"), [("gs://b/audit-kit/k", "gs://b/audit-kit/k"), (None, "https://example.test/kit")]
+)
+def test_resolve_kit_mirror_follows_the_explicit_kit_arg(monkeypatch, kit_arg, expected):
+    import argparse
+
+    from gensyn_audit import cli
+
+    monkeypatch.setattr(K, "load_trajectory", lambda k: None)
+    manifest = argparse.Namespace(kit="gs://b/audit-kit/k")
+    doc = _kit_doc(public_url_base="https://example.test/kit")
+    monkeypatch.setattr(K, "_read", lambda uri, **_: json.dumps(doc).encode())
+    k, _ = cli._resolve_kit(argparse.Namespace(kit=kit_arg), manifest)
+    assert k.public_prefix == expected
+
+
 class _JsonResp(io.BytesIO):
     headers = type("H", (), {"get_content_type": staticmethod(lambda: "application/json")})()
 
