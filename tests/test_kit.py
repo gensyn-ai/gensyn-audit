@@ -527,6 +527,33 @@ def test_format_2_on_macos_skips_the_index_and_checks_public_version(monkeypatch
     assert not any("--index-url" in c for c in calls)
 
 
+def test_reused_venv_with_the_wrong_torch_build_is_reprovisioned(monkeypatch, tmp_path):
+    from gensyn_audit import kit as kitmod
+
+    kit = replace(
+        _load(monkeypatch, _kit_doc(kit_format=1)),
+        torch_requirement="torch==2.12.1+cu132",
+        torch_index_url="https://download.pytorch.org/whl/cu132",
+    )
+    for f in (kitmod.venv_python(tmp_path / "venv"), kitmod.replay_entrypoint(tmp_path / "venv")):
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.touch()
+    calls = []
+
+    def fake_run(argv, **kw):
+        calls.append(argv)
+        return type("P", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    monkeypatch.setattr(kitmod.subprocess, "run", fake_run)
+    monkeypatch.setattr(kitmod, "_base_interpreter", lambda: "python3")
+    monkeypatch.setattr(kitmod, "build_info", lambda python: {"commit": kit.repop_commit})
+    monkeypatch.setattr(kitmod, "installed_torch", lambda python: "2.12.1+cu130")
+    monkeypatch.setattr(K.Kit, "wheels_in_install_order", lambda self, t: ())
+    with pytest.raises(AuditError):  # the stubbed install leaves cu130 in place
+        kitmod.provision(kit, tmp_path / "venv", {}, platform_tag="linux")
+    assert any("venv" in c for c in calls)
+
+
 def test_load_kit_rejects_a_malformed_torch_requirement(monkeypatch):
     with pytest.raises(AuditError, match="not torch==X"):
         _load(monkeypatch, _kit_doc(kit_format=1, torch_requirement="torch>=2.12"))
