@@ -46,7 +46,19 @@ def test_large_checkpoint_disk_and_cuda_memory(tmp_path, monkeypatch):
     disk = doctor._check_disk(tmp_path, unit, checkpoint_gb=96.4, streaming=True)
     assert "need ~345 GB" in disk.note
     monkeypatch.setattr(doctor, "_memory_gb", lambda: 96.0)
-    assert doctor._check_memory(unit, "cuda", checkpoint_gb=96.4).blocking
-    ok = doctor._check_memory(unit, "cuda", checkpoint_gb=96.4, streaming=True)
+        ok = doctor._check_memory(unit, "cuda", checkpoint_gb=96.4, streaming=True)
     assert ok.status == doctor.PASS and "90 s" in ok.fix and "20 s" in ok.fix
     assert doctor._check_memory(unit, "cuda").status == doctor.SKIP
+
+
+def test_small_sized_checkpoint_needs_at_least_the_unsized_figure(tmp_path):
+    unit = _interval()
+    unsized = doctor._check_disk(tmp_path, unit)
+    sized = doctor._check_disk(tmp_path, unit, checkpoint_gb=19.0)
+    assert sized.note == unsized.note
+
+
+def test_in_memory_below_400_gib_warns(monkeypatch):
+    monkeypatch.setattr(doctor, "_memory_gb", lambda: 96.0)
+    check = doctor._check_memory(_interval(), "cuda", checkpoint_gb=96.4)
+    assert check.status == doctor.WARN and not check.blocking

@@ -397,7 +397,8 @@ def test_the_headroom_checks_are_dropped_when_no_replay_will_start(tmp_path):
 
 
 def test_fold_spill_goes_to_scratch(kit_dir, tmp_path):
-    plan = _plan(kit_dir, tmp_path, unit=_interval_unit())
+    assert "--fold-spill-dir" not in _plan(kit_dir, tmp_path, unit=_interval_unit()).argv()
+    plan = _plan(kit_dir, tmp_path, unit=_interval_unit(), device="cuda", checkpoint_gb=96.4)
     argv = plan.argv()
     assert argv[argv.index("--fold-spill-dir") + 1] == str(plan.workdir.scratch / "fold")
 

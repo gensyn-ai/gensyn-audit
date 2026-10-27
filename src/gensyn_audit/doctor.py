@@ -229,14 +229,17 @@ def _check_large_cuda_memory(streaming: bool) -> Check:
         return Check("memory", PASS, value, note=note, fix=_LARGE_TIMING)
     if not streaming and host >= _LARGE_IN_MEMORY_HOST_GIB:
         return Check("memory", PASS, value, note=note, fix=_LARGE_TIMING)
+    if not streaming:
+        # 400 GiB is the host the run used, not a measured peak: advisory only.
+        return Check(
+            "memory", WARN, value, note=note, fix="Drop --in-memory (auto-stream applies)."
+        )
     return Check(
         "memory",
         FAIL,
         value,
         note=note,
-        fix="Pass --extra --stream --fetch-minimal."
-        if not streaming
-        else f"Streaming needs ~{_LARGE_STREAM_HOST_GIB * _MEMORY_HEADROOM:.0f} GiB host RAM.",
+        fix=f"Streaming needs ~{_LARGE_STREAM_HOST_GIB * _MEMORY_HEADROOM:.0f} GiB host RAM.",
     )
 
 
@@ -331,8 +334,12 @@ def _check_disk(
     else:
         need = _KIT_DISK_GB + _INTERVAL_DISK_GB
         if checkpoint_gb:
-            # Predecessor + hand-off at the same size, plus stream scratch.
-            need = _KIT_DISK_GB + checkpoint_gb * (2 + (_STREAM_SCRATCH_RATIO if streaming else 0))
+            # Predecessor + hand-off at the same size, plus stream scratch;
+            # never below the fixed figure, which also budgets shards/spill.
+            need = max(
+                need,
+                _KIT_DISK_GB + checkpoint_gb * (2 + (_STREAM_SCRATCH_RATIO if streaming else 0)),
+            )
     have_gb = 0.0 if unit.is_init else _already_on_disk_gb(workdir)
     need = max(need - have_gb, _KIT_DISK_GB)
     resumed = f", {have_gb:.0f} GB already fetched" if have_gb >= 1 else ""

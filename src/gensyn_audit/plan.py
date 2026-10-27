@@ -324,8 +324,10 @@ class Plan:
                 str(self.workdir.scratch / "master"),
             ]
         # The cross-replica fold spills to /tmp/audit_fold_* unless told
-        # otherwise; keep it with the other scratch.
-        args += ["--fold-spill-dir", str(self.workdir.scratch / "fold")]
+        # otherwise; keep it with the other scratch. Only for large
+        # checkpoints: older kits' audit_replay may not accept the flag.
+        if self.checkpoint_gb is not None and self.checkpoint_gb >= LARGE_CHECKPOINT_GB:
+            args += ["--fold-spill-dir", str(self.workdir.scratch / "fold")]
         # The per-step losses the record's gate runs on, written atomically
         # after every step so they survive a killed process.
         args += ["--loss-log", str(self.workdir.loss_log)]
