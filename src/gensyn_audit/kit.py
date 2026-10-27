@@ -88,7 +88,13 @@ class Kit:
 
     @property
     def public_prefix(self) -> str:
-        """Where to read this kit from. The https mirror when there is one."""
+        """Where to read this kit from. The https mirror when there is one.
+
+        A `gs://` kit stays on gs:// (read with ADC): the caller chose it, and
+        the mirror may be an internal bucket that needs headers meant for gs.
+        """
+        if self.prefix.startswith("gs://"):
+            return self.prefix
         return self.public_url_base or self.prefix
 
     @property
@@ -267,8 +273,12 @@ def _raise_not_a_document(uri: str, final_uri: str) -> None:
     )
 
 
-def _read(uri: str) -> bytes:
-    """Read one small file from gs://, https:// or a local path."""
+def _read(uri: str, *, kit: bool = False) -> bytes:
+    """Read one small file from gs://, https:// or a local path.
+
+    `kit=True` reads from a kit host: it takes `AUDIT_KIT_HEADERS`, never the
+    record's `AUDIT_HTTP_HEADERS`.
+    """
     if uri.startswith("gs://"):
         from . import gcs
 
@@ -277,11 +287,13 @@ def _read(uri: str) -> bytes:
     if uri.startswith(("http://", "https://")):
         # Same `AUDIT_HTTP_HEADERS` seam the record uses: a manifest served from
         # behind Cloudflare Access is unreadable without it, and the web app
-        # prints `--manifest <record>/manifest.json`.
+        # prints `--manifest <record>/manifest.json`. Kit files use
+        # `AUDIT_KIT_HEADERS` instead.
         from . import __version__
         from .record import _extra_headers
 
-        req = urllib.request.Request(uri, headers=_extra_headers())
+        var = "AUDIT_KIT_HEADERS" if kit else "AUDIT_HTTP_HEADERS"
+        req = urllib.request.Request(uri, headers=_extra_headers(var))
         # Cloudflare rejects the default `Python-urllib/…` agent outright.
         req.add_header("User-Agent", f"gensyn-audit/{__version__}")
         try:
@@ -321,7 +333,7 @@ def _join(prefix: str, name: str) -> str:
 
 def load_kit(prefix: str) -> Kit:
     """Read and validate ``<prefix>/kit.json``."""
-    raw = _read(_join(prefix, "kit.json"))
+    raw = _read(_join(prefix, "kit.json"), kit=True)
     try:
         doc = json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -365,7 +377,7 @@ def load_kit(prefix: str) -> Kit:
 
 def load_trajectory(kit: Kit, *, name: str = "trajectory.json") -> Trajectory:
     """Read ``<prefix>/trajectory.json`` and enforce provenance link 4."""
-    raw = _read(_join(kit.public_prefix, name))
+    raw = _read(_join(kit.public_prefix, name), kit=True)
     try:
         doc = json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -449,7 +461,7 @@ def stage(
             path.unlink()
         if on_progress:
             on_progress(entry, "fetching")
-        path.write_bytes(_read(_join(kit.public_prefix, entry.name)))
+        path.write_bytes(_read(_join(kit.public_prefix, entry.name), kit=True))
 
         got = _digest(path)
         if got != entry.sha256:
