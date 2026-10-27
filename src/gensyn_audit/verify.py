@@ -12,8 +12,9 @@ up saying "verified" about something it never checked:
    whatever ``state_hash.txt`` says untouched.
 2. **Tensor-state commitment** — is the state inside these bytes the state the
    run committed to at that step? That is the v3 chained hash, and
-   reconstructing it needs the target step's gradients and every
-   rank's batch chain. Runs in the kit's pinned pretrain, on disk, in seconds.
+   reconstructing it needs whatever the run folded into it: the target step's
+   gradients and every rank's batch chain when it hashed them (see
+   `handoff.py`). Runs in the kit's pinned pretrain, on disk, in seconds.
 3. **The replay** — does the next interval reproduce its own target? Hours, and
    the reason the first two exist.
 
@@ -395,9 +396,12 @@ def gate(
         result = check_state_hash(venv, checkpoint, expect=expect, prev=prev, device=device)
     if type(result.get("step")) is not int or result["step"] != pred.step:
         raise AuditError("the verifier returned the wrong checkpoint step.")
+    # Say where the gradients came from only when the run hashed them; a run
+    # that did not (open-8b) reconstructs from weights and moments alone.
+    grads = ", gradients from the sidecar" if handoff.gradients_required else ""
     echo(
         f"  {paint(PASS, 'green')} tensor state reconstructed and matched "
-        f"({result['dp_world_size']} DP rank(s), gradients from the sidecar)"
+        f"({result['dp_world_size']} DP rank(s){grads})"
     )
     verdict = Verdict(
         recordmod.CROWD,

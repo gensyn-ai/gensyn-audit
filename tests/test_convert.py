@@ -42,6 +42,26 @@ def test_pack_writes_the_single_file_the_record_takes(tmp_path):
     assert out.is_file() and out.read_text() == "tensors"
 
 
+def test_pack_takes_a_handoff_shaped_by_what_the_run_hashed(tmp_path):
+    """open-8b's writer exports no gradients and no rank chains; that is a
+    complete hand-off, and it packs. The same directory claiming open-1b's
+    contract does not."""
+    from conftest import write_handoff
+
+    venv = _kit_venv(tmp_path, '#!/bin/sh\nprintf tensors > "$3"\n')
+    sh = {"every_n_steps": 1, "include_grads": False, "include_batch": False}
+    src = write_handoff(tmp_path / "h8" / "step_000000501", step=501, world=48, state_hash=sh)
+    out = convert.pack(venv, src, tmp_path / "out8" / convert.BUNDLE_NAME)
+    assert out.read_text() == "tensors"
+
+    sh = {**sh, "include_grads": True, "include_batch": True}
+    meta = json.loads((src / "meta.json").read_text())
+    meta["config_resolved"] = json.dumps({"train": {"state_hash": sh}})
+    (src / "meta.json").write_text(json.dumps(meta))
+    with pytest.raises(AuditError, match="incomplete"):
+        convert.pack(venv, src, tmp_path / "out1" / convert.BUNDLE_NAME)
+
+
 def test_pack_asks_for_verification(tmp_path):
     """--verify re-reads the file and compares every tensor. It runs once per
     audit against bytes the next auditor replays from."""

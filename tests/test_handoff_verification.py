@@ -700,6 +700,151 @@ def test_invalid_handoff_topology_is_refused(tmp_path, metadata):
         inspect(root)
 
 
+# ── 7. the contract follows what the run hashed ──────────────────────────────
+
+#: What an open-1b checkpoint's config_resolved says (ckpt/step_000080900).
+_OPEN_1B_HASH = {"every_n_steps": 1, "include_grads": True, "include_batch": True, "at_init": True}
+#: What open-8b's says: weights and moments only. Its writer exports neither
+#: the gradients nor the rank chains.
+_OPEN_8B_HASH = {
+    "every_n_steps": 1,
+    "include_grads": False,
+    "include_batch": False,
+    "at_init": True,
+}
+
+
+def test_a_handoff_from_a_run_that_hashed_neither_is_complete_without_them(tmp_path):
+    """open-8b: 48 ranks, no gradients sidecar, no batch chains, and nothing
+    missing. Demanding files the writer never produces refuses every hand-off
+    the run can make."""
+    from gensyn_audit import handoff as handoff_mod
+
+    d = write_handoff(tmp_path / "h", world=48, state_hash=_OPEN_8B_HASH)
+    assert not (d / "gradients.safetensors").exists()
+    assert not list(d.glob("batch_hasher.rank_*.bin"))
+
+    h = handoff_mod.inspect(d)
+    assert h.is_complete, h.missing
+    assert not h.gradients_required and not h.batch_chains_required
+    assert not h.has_gradients and h.dp_world_size == 48
+    handoff_mod.require_complete(h, what="this hand-off")
+
+
+def test_a_handoff_from_a_run_that_hashed_both_still_needs_both(tmp_path):
+    """open-1b states both terms on, so dropping either one is still refused."""
+    from gensyn_audit import handoff as handoff_mod
+    from gensyn_audit.errors import AuditError
+
+    full = handoff_mod.inspect(write_handoff(tmp_path / "full", world=3, state_hash=_OPEN_1B_HASH))
+    assert full.is_complete and full.gradients_required and full.batch_chains_required
+
+    for dropped in ("gradients.safetensors", "batch_hasher.rank_2.bin"):
+        d = write_handoff(tmp_path / dropped, world=3, state_hash=_OPEN_1B_HASH, omit=(dropped,))
+        with pytest.raises(AuditError, match="incomplete") as exc:
+            handoff_mod.require_complete(handoff_mod.inspect(d), what="this hand-off")
+        assert dropped in exc.value.hint
+
+
+@pytest.mark.parametrize(
+    "state_hash,needs",
+    [
+        ({"every_n_steps": 1, "include_grads": True, "include_batch": False}, "gradients"),
+        ({"every_n_steps": 1, "include_grads": False, "include_batch": True}, "batch_hasher"),
+    ],
+)
+def test_each_term_decides_its_own_member(tmp_path, state_hash, needs):
+    from gensyn_audit import handoff as handoff_mod
+
+    d = write_handoff(tmp_path / "h", world=2, state_hash=state_hash)
+    for member in ("gradients.safetensors", "batch_hasher.rank_0.bin", "batch_hasher.rank_1.bin"):
+        (d / member).unlink(missing_ok=True)
+    missing = handoff_mod.inspect(d).missing
+    assert missing and all(name.startswith(needs) for name in missing)
+
+
+def test_a_run_that_hashed_nothing_exports_neither(tmp_path):
+    """audit_replay gates both exports on every_n_steps > 0 as well."""
+    from gensyn_audit import handoff as handoff_mod
+
+    sh = {"every_n_steps": 0, "include_grads": True, "include_batch": True}
+    h = handoff_mod.inspect(write_handoff(tmp_path / "h", world=2, state_hash=sh))
+    assert h.is_complete and not h.gradients_required and not h.batch_chains_required
+
+
+@pytest.mark.parametrize(
+    "state_hash,grads,chains",
+    [
+        ({"every_n_steps": 1, "include_batch": False}, True, False),
+        ({"every_n_steps": 1, "include_grads": False}, False, True),
+        ({"every_n_steps": 1}, True, True),
+        ({}, True, True),
+    ],
+)
+def test_an_unstated_term_keeps_the_full_contract(tmp_path, state_hash, grads, chains):
+    """Silence is not "off". A term the descriptor does not state is
+    required; only an explicit false drops its member."""
+    from gensyn_audit import handoff as handoff_mod
+
+    d = write_handoff(tmp_path / "h", world=2)
+    meta = json.loads((d / "meta.json").read_text())
+    meta["config_resolved"] = json.dumps({"train": {"state_hash": state_hash}})
+    (d / "meta.json").write_text(json.dumps(meta))
+    h = handoff_mod.inspect(d)
+    assert (h.gradients_required, h.batch_chains_required) == (grads, chains)
+
+
+@pytest.mark.parametrize(
+    "resolved",
+    [
+        json.dumps({"train": {}}),
+        json.dumps({}),
+    ],
+)
+def test_a_descriptor_without_the_block_needs_everything(tmp_path, resolved):
+    from gensyn_audit import handoff as handoff_mod
+
+    d = write_handoff(
+        tmp_path / "h", world=2, omit=("gradients.safetensors", "batch_hasher.rank_1.bin")
+    )
+    meta = json.loads((d / "meta.json").read_text())
+    meta["config_resolved"] = resolved
+    (d / "meta.json").write_text(json.dumps(meta))
+    h = handoff_mod.inspect(d)
+    assert h.gradients_required and h.batch_chains_required
+    assert {"gradients.safetensors", "batch_hasher.rank_1.bin"} <= set(h.missing)
+
+
+@pytest.mark.parametrize(
+    "resolved",
+    [
+        {"train": {"state_hash": _OPEN_8B_HASH}},  # an object, not the JSON string
+        "{not json",
+        json.dumps([]),
+        json.dumps({"train": []}),
+        json.dumps({"train": {"state_hash": "off"}}),
+        json.dumps({"train": {"state_hash": {**_OPEN_8B_HASH, "include_grads": "false"}}}),
+        json.dumps({"train": {"state_hash": {**_OPEN_8B_HASH, "include_batch": 0}}}),
+        json.dumps({"train": {"state_hash": {**_OPEN_8B_HASH, "include_grads": None}}}),
+        json.dumps({"train": {"state_hash": {**_OPEN_8B_HASH, "every_n_steps": True}}}),
+        json.dumps({"train": {"state_hash": {**_OPEN_8B_HASH, "every_n_steps": -1}}}),
+        json.dumps({"train": {"state_hash": {**_OPEN_8B_HASH, "every_n_steps": "1"}}}),
+    ],
+)
+def test_a_malformed_hash_contract_is_refused_not_relaxed(tmp_path, resolved):
+    """A value that cannot be read is not taken to mean the gradients and
+    chains are optional: the hand-off is refused outright."""
+    from gensyn_audit.errors import AuditError
+    from gensyn_audit.handoff import inspect
+
+    d = write_handoff(tmp_path / "h", world=2, state_hash=_OPEN_8B_HASH)
+    meta = json.loads((d / "meta.json").read_text())
+    meta["config_resolved"] = resolved
+    (d / "meta.json").write_text(json.dumps(meta))
+    with pytest.raises(AuditError, match="malformed config_resolved"):
+        inspect(d)
+
+
 @pytest.mark.parametrize("step", [1, 100])
 @pytest.mark.parametrize("device", ["cpu", "mps"])
 @pytest.mark.parametrize("packed", [False, True])
