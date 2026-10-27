@@ -378,7 +378,13 @@ def test_the_headroom_checks_are_dropped_when_no_replay_will_start(tmp_path):
         predecessor_step=102,
     )
     plan = SimpleNamespace(
-        device="cpu", unit=unit, workdir=Workdir(tmp_path), kit=None, venv=tmp_path / "venv"
+        device="cpu",
+        unit=unit,
+        workdir=Workdir(tmp_path),
+        kit=None,
+        venv=tmp_path / "venv",
+        checkpoint_gb=None,
+        streaming=False,
     )
 
     sizing = {"memory", "free disk"}
@@ -388,3 +394,16 @@ def test_the_headroom_checks_are_dropped_when_no_replay_will_start(tmp_path):
     assert sizing <= replaying, "a real replay must still be sized"
     assert not (sizing & reporting)
     assert replaying - sizing == reporting, "nothing else may be skipped"
+
+
+def test_fold_spill_goes_to_scratch(kit_dir, tmp_path):
+    plan = _plan(kit_dir, tmp_path, unit=_interval_unit())
+    argv = plan.argv()
+    assert argv[argv.index("--fold-spill-dir") + 1] == str(plan.workdir.scratch / "fold")
+
+
+def test_large_cuda_checkpoint_on_small_host_streams(kit_dir, tmp_path):
+    kw = dict(unit=_interval_unit(), device="cuda", checkpoint_gb=96.4)
+    assert _plan(kit_dir, tmp_path, host_gb=96, **kw).streaming
+    assert not _plan(kit_dir, tmp_path, host_gb=512, **kw).streaming
+    assert not _plan(kit_dir, tmp_path, host_gb=96, in_memory=True, **kw).streaming
