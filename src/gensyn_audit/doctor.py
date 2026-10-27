@@ -16,6 +16,7 @@ import json
 import math
 import os
 import platform
+import re
 import resource
 import shutil
 import subprocess
@@ -412,7 +413,34 @@ def _check_kit(kit: Kit, venv: Path, device: str) -> list[Check]:
                 "verification claims to cover.",
             )
         )
+    checks.append(_check_torch(python, kit, device))
     return checks
+
+
+def _check_torch(python: Path, kit: Kit, device: str) -> Check:
+    have = kitmod.installed_torch(python)
+    if have is None:
+        return Check(
+            "torch", FAIL, "not importable", fix=f"Delete {python.parent.parent} and re-run."
+        )
+    want = kit.torch_requirement.split("==", 1)[-1] if kit.torch_requirement else None
+    if want and have != want:
+        return Check(
+            "torch", FAIL, have, note=f"kit pins {want}", fix="Delete the audit venv and re-run."
+        )
+    cuda = re.search(r"\+cu(\d\d)", have)
+    if device == "cuda" and cuda:
+        smi = _run(["nvidia-smi"], timeout=15) if shutil.which("nvidia-smi") else None
+        driver = re.search(r"CUDA Version:\s*(\d+)", smi.stdout) if smi else None
+        if driver and int(driver[1]) < int(cuda[1]):
+            return Check(
+                "torch",
+                WARN,
+                have,
+                note=f"driver supports CUDA {driver[1]}",
+                fix=f"This torch build needs a driver that runs CUDA {cuda[1]}. Update the NVIDIA driver.",
+            )
+    return Check("torch", PASS, have)
 
 
 #: What audit_replay demands of a checkpoint's descriptor before it will

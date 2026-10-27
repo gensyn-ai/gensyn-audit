@@ -452,3 +452,44 @@ class _Ran:
 #: `sys.version_info` is indexed *and* read by attribute, so a bare tuple is
 #: not a stand-in for it.
 _Version = namedtuple("_Version", "major minor micro releaselevel serial")
+
+
+# ── torch build pin ──────────────────────────────────────────────────────────
+
+
+def test_kit_format_2_requires_the_torch_build_and_index(monkeypatch):
+    with pytest.raises(AuditError, match="needs torch_requirement and torch_index_url"):
+        _load(monkeypatch, _kit_doc(kit_format=2))
+    k = _load(
+        monkeypatch,
+        _kit_doc(
+            kit_format=2,
+            torch_requirement="torch==2.12.1+cu132",
+            torch_index_url="https://download.pytorch.org/whl/cu132/",
+        ),
+    )
+    assert k.torch_requirement == "torch==2.12.1+cu132"
+    assert k.torch_index_url == "https://download.pytorch.org/whl/cu132"
+
+
+def test_provision_refuses_a_torch_that_is_not_the_pin(monkeypatch, tmp_path):
+    from gensyn_audit import kit as kitmod
+
+    kit = replace(
+        _load(monkeypatch, _kit_doc(kit_format=1)),
+        torch_requirement="torch==2.12.1+cu132",
+        torch_index_url="https://download.pytorch.org/whl/cu132",
+    )
+    calls = []
+
+    def fake_run(argv, **kw):
+        calls.append(argv)
+        return type("P", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    monkeypatch.setattr(kitmod.subprocess, "run", fake_run)
+    monkeypatch.setattr(kitmod, "_base_interpreter", lambda: "python3")
+    monkeypatch.setattr(kitmod, "installed_torch", lambda python: "2.12.1+cu130")
+    monkeypatch.setattr(K.Kit, "wheels_in_install_order", lambda self, tag: ())
+    with pytest.raises(AuditError, match="torch 2.12.1\\+cu130"):
+        kitmod.provision(kit, tmp_path / "venv", {}, platform_tag="linux")
+    assert "torch==2.12.1+cu132" in calls[1] and "--index-url" in calls[1]
