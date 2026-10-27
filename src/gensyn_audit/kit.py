@@ -259,7 +259,7 @@ class Trajectory:
 # ── fetching ─────────────────────────────────────────────────────────────────
 
 
-def _raise_not_a_document(uri: str, final_uri: str) -> None:
+def _raise_not_a_document(uri: str, final_uri: str, var: str = "AUDIT_HTTP_HEADERS") -> None:
     """`uri` answered with a web page. Say which wall was hit, and how to pass it."""
     redirected = final_uri and final_uri.split("?", 1)[0] != uri
     where = f"\n  It redirected to {final_uri.split('?', 1)[0]}" if redirected else ""
@@ -268,14 +268,18 @@ def _raise_not_a_document(uri: str, final_uri: str) -> None:
         hint="This is almost always an access gateway asking you to sign in.\n"
         "Staging sits behind Cloudflare Access; production is not expected to.\n"
         "Get a token and put it in the environment:\n"
-        '  export AUDIT_HTTP_HEADERS="cf-access-token: $(cloudflared access token \\\n'
+        f'  export {var}="cf-access-token: $(cloudflared access token \\\n'
         '      -app=https://open1b.gensyn-staging.ai)"\n'
         "Or point --manifest at a record that does not need one.",
     )
 
 
-def _read(uri: str) -> bytes:
-    """Read one small file from gs://, https:// or a local path."""
+def _read(uri: str, *, kit: bool = False) -> bytes:
+    """Read one small file from gs://, https:// or a local path.
+
+    `kit=True` reads from a kit host: it takes `AUDIT_KIT_HEADERS`, never the
+    record's `AUDIT_HTTP_HEADERS`.
+    """
     if uri.startswith("gs://"):
         from . import gcs
 
@@ -284,11 +288,13 @@ def _read(uri: str) -> bytes:
     if uri.startswith(("http://", "https://")):
         # Same `AUDIT_HTTP_HEADERS` seam the record uses: a manifest served from
         # behind Cloudflare Access is unreadable without it, and the web app
-        # prints `--manifest <record>/manifest.json`.
+        # prints `--manifest <record>/manifest.json`. Kit files use
+        # `AUDIT_KIT_HEADERS` instead.
         from . import __version__
         from .record import _extra_headers
 
-        req = urllib.request.Request(uri, headers=_extra_headers())
+        var = "AUDIT_KIT_HEADERS" if kit else "AUDIT_HTTP_HEADERS"
+        req = urllib.request.Request(uri, headers=_extra_headers(var))
         # Cloudflare rejects the default `Python-urllib/…` agent outright.
         req.add_header("User-Agent", f"gensyn-audit/{__version__}")
         try:
@@ -300,7 +306,7 @@ def _read(uri: str) -> bytes:
                 # their credentials. Nothing this reads is ever HTML: not a
                 # manifest, not kit.json, not a wheel.
                 if resp.headers.get_content_type() == "text/html":
-                    _raise_not_a_document(uri, resp.geturl())
+                    _raise_not_a_document(uri, resp.geturl(), var)
                 return body
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise AuditError(f"could not fetch {uri}: {exc}") from exc
@@ -326,9 +332,13 @@ def _join(prefix: str, name: str) -> str:
     return prefix.rstrip("/") + "/" + name
 
 
-def load_kit(prefix: str) -> Kit:
-    """Read and validate ``<prefix>/kit.json``."""
-    raw = _read(_join(prefix, "kit.json"))
+def load_kit(prefix: str, *, mirror: bool = True) -> Kit:
+    """Read and validate ``<prefix>/kit.json``.
+
+    `mirror=False` ignores `public_url_base`: a `--kit gs://` the caller chose
+    stays on gs:// (read with ADC), not on a mirror that may need other headers.
+    """
+    raw = _read(_join(prefix, "kit.json"), kit=True)
     try:
         doc = json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -381,13 +391,13 @@ def load_kit(prefix: str) -> Kit:
         repop_commit=doc["repop_commit"],
         files=tuple(files),
         prefix=prefix.rstrip("/"),
-        public_url_base=public,
+        public_url_base=public if mirror else None,
     )
 
 
 def load_trajectory(kit: Kit, *, name: str = "trajectory.json") -> Trajectory:
     """Read ``<prefix>/trajectory.json`` and enforce provenance link 4."""
-    raw = _read(_join(kit.public_prefix, name))
+    raw = _read(_join(kit.public_prefix, name), kit=True)
     try:
         doc = json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -471,7 +481,7 @@ def stage(
             path.unlink()
         if on_progress:
             on_progress(entry, "fetching")
-        path.write_bytes(_read(_join(kit.public_prefix, entry.name)))
+        path.write_bytes(_read(_join(kit.public_prefix, entry.name), kit=True))
 
         got = _digest(path)
         if got != entry.sha256:

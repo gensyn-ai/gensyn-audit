@@ -350,10 +350,12 @@ class HttpRecord:
         req.add_header("User-Agent", f"gensyn-audit/{__version__}")
         if data is not None:
             req.add_header("Content-Type", "application/json")
-        if claim:
-            req.add_header("Authorization", f"Bearer {claim}")
         for key, value in _extra_headers().items():
             req.add_header(key, value)
+        # After the extras: `add_header` replaces, and a claim-bearing request
+        # must carry the claim token whatever `AUDIT_HTTP_HEADERS` says.
+        if claim:
+            req.add_header("Authorization", f"Bearer {claim}")
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 raw = resp.read().decode("utf-8", errors="replace")
@@ -501,15 +503,18 @@ def _api_error(exc: urllib.error.HTTPError, method: str, path: str) -> AuditErro
     )
 
 
-def _extra_headers() -> dict[str, str]:
+def _extra_headers(var: str = "AUDIT_HTTP_HEADERS") -> dict[str, str]:
     """Extra headers from `AUDIT_HTTP_HEADERS` (``K: V`` per line).
+
+    `AUDIT_KIT_HEADERS` (var=...) is the same format for kit reads, so a
+    credential for the kit host never goes to the record host or the reverse.
 
     Staging sits behind Cloudflare Access, which a CLI cannot complete on its
     own. This is the seam for a `cf-access-token` obtained out of band, and it
     is deliberately generic rather than a CF-specific flag: production is not
     expected to need it.
     """
-    raw = os.environ.get("AUDIT_HTTP_HEADERS", "")
+    raw = os.environ.get(var, "")
     out = {}
     for line in raw.splitlines():
         key, sep, value = line.partition(":")

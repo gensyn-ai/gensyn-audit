@@ -85,7 +85,9 @@ def _resolve_kit(args: argparse.Namespace, manifest=None) -> tuple[kitmod.Kit, k
             "  gensyn-audit run --manifest <url>          # names the kit, record and roots\n"
             "  gensyn-audit run --kit <prefix>            # the kit directly",
         )
-    k = kitmod.load_kit(prefix)
+    # An explicit --kit gs:// is read via ADC and, deliberately, cited as that
+    # gs:// prefix in receipts; a manifest-named gs:// kit still uses its mirror.
+    k = kitmod.load_kit(prefix, mirror=not (args.kit or "").startswith("gs://"))
     return k, kitmod.load_trajectory(k)
 
 
@@ -1628,13 +1630,15 @@ def _explain_missing_handoff() -> None:
     for line in (
         "The record accepts a safetensors hand-off of weights + optimizer with a",
         "handoff.json sidecar, and nothing else. audit_replay writes a",
-        "torch.distributed.checkpoint directory plus gradients.safetensors and one",
-        "batch-hasher chain per rank. These must be packed by the kit's",
-        "pretrain-dcp-safetensors converter before submission. Check the",
-        "packing error above or install a kit containing the current converter.",
+        "torch.distributed.checkpoint directory plus, when the run hashes them,",
+        "gradients.safetensors and one batch-hasher chain per rank. These must be",
+        "packed by the kit's pretrain-dcp-safetensors converter before submission.",
+        "Check the packing error above or install a kit containing the current",
+        "converter.",
         "",
-        "Both matter to the recipient: without the gradients they cannot reconstruct",
-        "the state hash the run published for this step, only trust that you did.",
+        "That matters to the recipient: without what the run hashed they cannot",
+        "reconstruct the state hash it published for this step, only trust that",
+        "you did.",
         "",
         "Your result is recorded either way — this affects the next auditor, not you.",
     ):
@@ -1692,14 +1696,18 @@ def _do_upload(
     handoffs_mod.remember(
         bundle.path, bundle.digest, step=getattr(state, "audit_step", None), run=state.run
     )
-    ticket = record.upload_ticket(
-        state.run,
-        state.until_step,
-        claim=state.claim,
-        size=bundle.size,
-        digest=bundle.digest,
-        submission_id=(response.submission_id if response else None),
-    )
+
+    def fresh_ticket():
+        return record.upload_ticket(
+            state.run,
+            state.until_step,
+            claim=state.claim,
+            size=bundle.size,
+            digest=bundle.digest,
+            submission_id=(response.submission_id if response else None),
+        )
+
+    ticket = fresh_ticket()
 
     def on_progress(done: int, total: int) -> None:
         pct = int(100 * done / total) if total else 100
@@ -1710,6 +1718,16 @@ def _do_upload(
     else:
         uploadmod.send(bundle, ticket, on_progress=on_progress)
         print()
+        # The sidecar URL is signed for an hour from the ticket, and a slow
+        # 8B bundle outlives that; sign the sidecar again once the bundle lands.
+        fresh = fresh_ticket()
+        if uploadmod._object_of(fresh) != uploadmod._object_of(ticket):
+            raise AuditError(
+                "the record re-signed the hand-off for a different object.",
+                hint=f"bundle went to {uploadmod._object_of(ticket)}, "
+                f"sidecar would go to {uploadmod._object_of(fresh)}",
+            )
+        ticket = fresh
     uploadmod.send_sidecar(uploadmod.sidecar(result, bundle, run_id=run_id), ticket)
     uploadmod._forget_session(bundle)
     echo(kv("sidecar", "handoff.json", ticket.sidecar_uri or ""))
