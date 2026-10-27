@@ -3,7 +3,9 @@ would let a result that verified nothing be reported as evidence."""
 
 from __future__ import annotations
 
+import io
 import json
+import urllib.request
 from collections import namedtuple
 from dataclasses import replace
 
@@ -347,13 +349,13 @@ def _kit_doc(**extra):
     }
 
 
-def _load(monkeypatch, doc, prefix="gs://b/audit-kit/k"):
+def _load(monkeypatch, doc, prefix="gs://b/audit-kit/k", **kw):
     import json as _json
 
     from gensyn_audit import kit as kitmod
 
-    monkeypatch.setattr(kitmod, "_read", lambda uri: _json.dumps(doc).encode())
-    return kitmod.load_kit(prefix)
+    monkeypatch.setattr(kitmod, "_read", lambda uri, **_: _json.dumps(doc).encode())
+    return kitmod.load_kit(prefix, **kw)
 
 
 def test_a_gs_kit_is_read_from_its_public_mirror(monkeypatch):
@@ -393,7 +395,7 @@ def test_staged_files_come_from_the_mirror(monkeypatch, tmp_path):
 
     k = _load(monkeypatch, _kit_doc(public_url_base="https://example.test/kit"))
     seen = []
-    monkeypatch.setattr(kitmod, "_read", lambda uri: seen.append(uri) or b"{}")
+    monkeypatch.setattr(kitmod, "_read", lambda uri, **_: seen.append(uri) or b"{}")
     with pytest.raises(AuditError):
         kitmod.load_trajectory(k)
     assert seen and seen[0].startswith("https://example.test/kit/")
@@ -452,3 +454,65 @@ class _Ran:
 #: `sys.version_info` is indexed *and* read by attribute, so a bare tuple is
 #: not a stand-in for it.
 _Version = namedtuple("_Version", "major minor micro releaselevel serial")
+
+
+def test_an_explicit_gs_kit_stays_on_gs(monkeypatch):
+    k = _load(monkeypatch, _kit_doc(public_url_base="https://example.test/kit"), mirror=False)
+    assert k.public_prefix == "gs://b/audit-kit/k"
+
+
+@pytest.mark.parametrize(
+    ("kit_arg", "expected"), [("gs://b/audit-kit/k", "gs://b/audit-kit/k"), (None, "https://example.test/kit")]
+)
+def test_resolve_kit_mirror_follows_the_explicit_kit_arg(monkeypatch, kit_arg, expected):
+    import argparse
+
+    from gensyn_audit import cli
+
+    monkeypatch.setattr(K, "load_trajectory", lambda k: None)
+    manifest = argparse.Namespace(kit="gs://b/audit-kit/k")
+    doc = _kit_doc(public_url_base="https://example.test/kit")
+    monkeypatch.setattr(K, "_read", lambda uri, **_: json.dumps(doc).encode())
+    k, _ = cli._resolve_kit(argparse.Namespace(kit=kit_arg), manifest)
+    assert k.public_prefix == expected
+
+
+class _JsonResp(io.BytesIO):
+    headers = type("H", (), {"get_content_type": staticmethod(lambda: "application/json")})()
+
+    def geturl(self):
+        return "https://h/x"
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def test_kit_reads_send_kit_headers_only(monkeypatch):
+    from gensyn_audit import kit as kitmod
+
+    monkeypatch.setenv("AUDIT_HTTP_HEADERS", "X-Rec: r")
+    monkeypatch.setenv("AUDIT_KIT_HEADERS", "X-Kit: k")
+    seen = []
+    monkeypatch.setattr(
+        urllib.request, "urlopen", lambda req, **kw: seen.append(req) or _JsonResp(b"{}")
+    )
+    kitmod._read("https://h/kit.json", kit=True)
+    kitmod._read("https://h/manifest.json")
+    kit_req, rec_req = seen
+    assert kit_req.get_header("X-kit") == "k" and not kit_req.has_header("X-rec")
+    assert rec_req.get_header("X-rec") == "r" and not rec_req.has_header("X-kit")
+
+
+def test_claim_token_beats_extra_authorization_header(monkeypatch):
+    from gensyn_audit.record import HttpRecord
+
+    monkeypatch.setenv("AUDIT_HTTP_HEADERS", "authorization: Bearer evil")
+    seen = []
+    monkeypatch.setattr(
+        urllib.request, "urlopen", lambda req, **kw: seen.append(req) or _JsonResp(b"{}")
+    )
+    HttpRecord("https://example.invalid")._request_text("GET", "/x", claim="tok")
+    assert seen[0].get_header("Authorization") == "Bearer tok"
