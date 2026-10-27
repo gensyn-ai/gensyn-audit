@@ -763,13 +763,46 @@ def test_each_term_decides_its_own_member(tmp_path, state_hash, needs):
     assert missing and all(name.startswith(needs) for name in missing)
 
 
-def test_a_run_that_hashed_nothing_exports_neither(tmp_path):
-    """audit_replay gates both exports on every_n_steps > 0 as well."""
+@pytest.mark.parametrize("include", [False, True])
+def test_a_run_that_hashed_nothing_cannot_be_handed_off(tmp_path, include):
+    """every_n_steps 0 publishes no commitment, so the kit's verifier refuses
+    the hand-off whatever the include flags say. It must never read as a
+    complete hand-off with nothing to carry."""
     from gensyn_audit import handoff as handoff_mod
+    from gensyn_audit.errors import AuditError
 
-    sh = {"every_n_steps": 0, "include_grads": True, "include_batch": True}
-    h = handoff_mod.inspect(write_handoff(tmp_path / "h", world=2, state_hash=sh))
-    assert h.is_complete and not h.gradients_required and not h.batch_chains_required
+    sh = {"every_n_steps": 0, "include_grads": include, "include_batch": include}
+    d = write_handoff(tmp_path / "h", world=2, state_hash=sh)
+    with pytest.raises(AuditError, match="did not hash its state"):
+        handoff_mod.inspect(d)
+
+
+@pytest.mark.parametrize("include", [False, True])
+@pytest.mark.parametrize("step,due", [(500, True), (1000, True), (501, False), (1, False)])
+def test_only_a_hash_due_step_can_be_handed_off(tmp_path, include, step, due):
+    """The published log holds no hash for a step off the cadence, so the
+    verifier refuses it; packing and uploading it would only be rejected."""
+    from gensyn_audit import handoff as handoff_mod
+    from gensyn_audit.errors import AuditError
+
+    sh = {"every_n_steps": 100, "include_grads": include, "include_batch": include}
+    d = write_handoff(tmp_path / "h", world=2, step=step, state_hash=sh)
+    if due:
+        assert handoff_mod.inspect(d).is_complete
+    else:
+        with pytest.raises(AuditError, match="off the run's hash cadence"):
+            handoff_mod.inspect(d)
+
+
+def test_an_unhashable_handoff_is_not_packed_or_uploaded(tmp_path):
+    """The refusal reaches the two places that would otherwise send it."""
+    from gensyn_audit import upload as uploadmod
+    from gensyn_audit.errors import AuditError
+
+    sh = {"every_n_steps": 100, "include_grads": False, "include_batch": False}
+    d = write_handoff(tmp_path / "h", world=2, step=501, state_hash=sh, safetensors=10)
+    with pytest.raises(AuditError, match="off the run's hash cadence"):
+        uploadmod.build_bundle(d, tmp_path)
 
 
 @pytest.mark.parametrize(

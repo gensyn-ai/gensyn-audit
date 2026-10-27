@@ -25,7 +25,10 @@ folds them in, decided the way the writer decides it, from
 include_batch``. open-1b hashes both; open-8b hashes neither, and its writer
 exports neither. A descriptor that does not say is held to the full contract,
 and one that says something malformed is refused, so a missing field can never
-shrink what has to travel. Taking this from the artifact's own meta.json is
+shrink what has to travel. A stated cadence must also make the step one the
+kit's verifier can check: a run that did not hash (``every_n_steps: 0``) or a
+step off the cadence has no published hash, so it is refused rather than
+packed and uploaded to be rejected. Taking this from the artifact's own meta.json is
 safe for the same reason the kit's verifier gives: these are inputs to the
 digest, so a hand-off that turns them off to travel light reconstructs a
 different hash and fails the comparison.
@@ -135,7 +138,7 @@ def _descriptor(root: Path, meta: dict | None) -> tuple[int | None, int]:
     return step, world
 
 
-def _hash_contract(root: Path, meta: dict | None) -> tuple[bool, bool]:
+def _hash_contract(root: Path, meta: dict | None, step: int | None) -> tuple[bool, bool]:
     """`(gradients, batch chains)`: which of the two the run's state hash folds in.
 
     Mirrors ``audit_replay``, which exports ``gradients.safetensors`` only when
@@ -145,9 +148,15 @@ def _hash_contract(root: Path, meta: dict | None) -> tuple[bool, bool]:
 
     Absence keeps the full contract: no meta (reported missing anyway), no
     ``config_resolved``, or no value for a field all mean "require it". Only an
-    explicit, well-formed ``false`` (or ``every_n_steps: 0``) drops a member.
-    Anything else in those places is refused, because the alternative to
-    refusing a value we cannot read is guessing which files are optional.
+    explicit, well-formed ``false`` drops a member. Anything else in those
+    places is refused, because the alternative to refusing a value we cannot
+    read is guessing which files are optional.
+
+    A stated cadence is held to what the kit's hand-off verifier accepts: a run
+    that did not hash (``every_n_steps: 0``) has no published commitment to
+    check against, and a step off the cadence has no published hash at all.
+    Either is refused here rather than packed and uploaded only to be rejected,
+    and neither is ever read as "nothing to carry".
     """
     import json
 
@@ -187,7 +196,21 @@ def _hash_contract(root: Path, meta: dict | None) -> tuple[bool, bool]:
         value = sh.get(key, True)
         if type(value) is not bool:
             raise malformed(f"train.state_hash.{key}={value!r}")
-        flags.append(every > 0 and value)
+        flags.append(value)
+    if every == 0:
+        raise AuditError(
+            f"{root} comes from a run that did not hash its state "
+            "(train.state_hash.every_n_steps is 0).",
+            hint="There is no published commitment to check it against, so the "
+            "next auditor's verifier refuses it. It cannot be handed off.",
+        )
+    if step is not None and step % every:
+        raise AuditError(
+            f"{root} is at step {step}, off the run's hash cadence (every {every} steps).",
+            hint="The published log holds no hash for that step, so the next "
+            "auditor's verifier refuses it. Only a hash-due step can be "
+            "handed off.",
+        )
     return flags[0], flags[1]
 
 
@@ -197,7 +220,7 @@ def inspect(root: Path) -> Handoff:
         raise AuditError(f"no hand-off directory at {root}.")
     meta = _read_meta(root)
     step, world = _descriptor(root, meta)
-    grads, chains = _hash_contract(root, meta)
+    grads, chains = _hash_contract(root, meta, step)
     wanted = [*_ALWAYS]
     if grads:
         wanted.append(GRADIENTS)
