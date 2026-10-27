@@ -456,6 +456,111 @@ class _Ran:
 _Version = namedtuple("_Version", "major minor micro releaselevel serial")
 
 
+# ── torch build pin ──────────────────────────────────────────────────────────
+
+
+def test_kit_format_2_requires_the_torch_build_and_index(monkeypatch):
+    with pytest.raises(AuditError, match="needs torch_requirement and torch_index_url"):
+        _load(monkeypatch, _kit_doc(kit_format=2))
+    k = _load(
+        monkeypatch,
+        _kit_doc(
+            kit_format=2,
+            torch_requirement="torch==2.12.1+cu132",
+            torch_index_url="https://download.pytorch.org/whl/cu132/",
+        ),
+    )
+    assert k.torch_requirement == "torch==2.12.1+cu132"
+    assert k.torch_index_url == "https://download.pytorch.org/whl/cu132"
+
+
+def test_provision_refuses_a_torch_that_is_not_the_pin(monkeypatch, tmp_path):
+    from gensyn_audit import kit as kitmod
+
+    kit = replace(
+        _load(monkeypatch, _kit_doc(kit_format=1)),
+        torch_requirement="torch==2.12.1+cu132",
+        torch_index_url="https://download.pytorch.org/whl/cu132",
+    )
+    calls = []
+
+    def fake_run(argv, **kw):
+        calls.append(argv)
+        return type("P", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    monkeypatch.setattr(kitmod.subprocess, "run", fake_run)
+    monkeypatch.setattr(kitmod, "_base_interpreter", lambda: "python3")
+    monkeypatch.setattr(kitmod, "installed_torch", lambda python: "2.12.1+cu130")
+    monkeypatch.setattr(K.Kit, "wheels_in_install_order", lambda self, tag: ())
+    with pytest.raises(AuditError, match="torch 2.12.1\\+cu130"):
+        kitmod.provision(kit, tmp_path / "venv", {}, platform_tag="linux")
+    assert "torch==2.12.1+cu132" in calls[1] and "--index-url" in calls[1]
+
+
+def _provision_with_torch(monkeypatch, tmp_path, kit, installed, tag):
+    from gensyn_audit import kit as kitmod
+
+    calls = []
+
+    def fake_run(argv, **kw):
+        calls.append(argv)
+        return type("P", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    monkeypatch.setattr(kitmod.subprocess, "run", fake_run)
+    monkeypatch.setattr(kitmod, "_base_interpreter", lambda: "python3")
+    monkeypatch.setattr(kitmod, "installed_torch", lambda python: installed)
+    monkeypatch.setattr(K.Kit, "wheels_in_install_order", lambda self, t: ())
+    kitmod.provision(kit, tmp_path / "venv", {}, platform_tag=tag)
+    return calls
+
+
+def test_format_1_public_pin_accepts_a_local_cuda_build(monkeypatch, tmp_path):
+    kit = replace(_load(monkeypatch, _kit_doc(kit_format=1)), torch_requirement="torch==2.12.1")
+    _provision_with_torch(monkeypatch, tmp_path, kit, "2.12.1+cu130", "linux")
+
+
+def test_format_2_on_macos_skips_the_index_and_checks_public_version(monkeypatch, tmp_path):
+    kit = replace(
+        _load(monkeypatch, _kit_doc(kit_format=1)),
+        torch_requirement="torch==2.12.1+cu132",
+        torch_index_url="https://download.pytorch.org/whl/cu132",
+    )
+    calls = _provision_with_torch(monkeypatch, tmp_path, kit, "2.12.1", "macosx")
+    assert not any("--index-url" in c for c in calls)
+
+
+def test_reused_venv_with_the_wrong_torch_build_is_reprovisioned(monkeypatch, tmp_path):
+    from gensyn_audit import kit as kitmod
+
+    kit = replace(
+        _load(monkeypatch, _kit_doc(kit_format=1)),
+        torch_requirement="torch==2.12.1+cu132",
+        torch_index_url="https://download.pytorch.org/whl/cu132",
+    )
+    for f in (kitmod.venv_python(tmp_path / "venv"), kitmod.replay_entrypoint(tmp_path / "venv")):
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.touch()
+    calls = []
+
+    def fake_run(argv, **kw):
+        calls.append(argv)
+        return type("P", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    monkeypatch.setattr(kitmod.subprocess, "run", fake_run)
+    monkeypatch.setattr(kitmod, "_base_interpreter", lambda: "python3")
+    monkeypatch.setattr(kitmod, "build_info", lambda python: {"commit": kit.repop_commit})
+    monkeypatch.setattr(kitmod, "installed_torch", lambda python: "2.12.1+cu130")
+    monkeypatch.setattr(K.Kit, "wheels_in_install_order", lambda self, t: ())
+    with pytest.raises(AuditError):  # the stubbed install leaves cu130 in place
+        kitmod.provision(kit, tmp_path / "venv", {}, platform_tag="linux")
+    assert any("venv" in c for c in calls)
+
+
+def test_load_kit_rejects_a_malformed_torch_requirement(monkeypatch):
+    with pytest.raises(AuditError, match="not torch==X"):
+        _load(monkeypatch, _kit_doc(kit_format=1, torch_requirement="torch>=2.12"))
+
+
 def test_an_explicit_gs_kit_stays_on_gs(monkeypatch):
     k = _load(monkeypatch, _kit_doc(public_url_base="https://example.test/kit"), mirror=False)
     assert k.public_prefix == "gs://b/audit-kit/k"

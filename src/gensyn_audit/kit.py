@@ -43,6 +43,7 @@ from pathlib import Path
 from .errors import AuditError
 
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
+TORCH_PIN = re.compile(r"torch==[0-9][a-zA-Z0-9.+!-]*")
 
 #: repop wheels are built per CPython minor; the published ones are cp311.
 REQUIRED_PYTHON = (3, 11)
@@ -76,6 +77,12 @@ class Kit:
     files: tuple[KitFile, ...]
     prefix: str
     """Where it came from, so the receipt can name a resolvable kit URL."""
+
+    torch_requirement: str | None = None
+    """Exact torch build the kit's hashes were minted under, e.g. ``torch==2.12.1+cu132``."""
+
+    torch_index_url: str | None = None
+    """Where pip fetches ``torch_requirement`` from; PyPI's default CUDA build may differ."""
 
     public_url_base: str | None = None
     """The https prefix the publisher served this kit from.
@@ -338,9 +345,9 @@ def load_kit(prefix: str, *, mirror: bool = True) -> Kit:
         raise AuditError(f"{prefix}/kit.json is not valid JSON: {exc}") from exc
 
     fmt = doc.get("kit_format")
-    if fmt != 1:
+    if fmt not in (1, 2):
         raise AuditError(
-            f"kit at {prefix} declares kit_format {fmt}; this runner understands 1.",
+            f"kit at {prefix} declares kit_format {fmt}; this runner understands 1 and 2.",
             hint="pip install -U gensyn-audit",
         )
     for key in ("pretrain_commit", "repop_commit"):
@@ -363,8 +370,23 @@ def load_kit(prefix: str, *, mirror: bool = True) -> Kit:
         # location that needs no credentials.
         raise AuditError(f"kit at {prefix}: public_url_base is not an http(s) URL ({public!r}).")
 
+    torch_req = str(doc.get("torch_requirement", "")) or None
+    torch_index = str(doc.get("torch_index_url", "")).rstrip("/") or None
+    if torch_req and not TORCH_PIN.fullmatch(torch_req):
+        raise AuditError(f"kit at {prefix}: torch_requirement is not torch==X ({torch_req!r}).")
+    if fmt >= 2 and not (torch_req and torch_index):
+        raise AuditError(
+            f"kit at {prefix}: kit_format 2 needs torch_requirement and torch_index_url."
+        )
+    if torch_index and not torch_index.startswith(("http://", "https://")):
+        raise AuditError(
+            f"kit at {prefix}: torch_index_url is not an http(s) URL ({torch_index!r})."
+        )
+
     return Kit(
         kit_format=fmt,
+        torch_requirement=torch_req,
+        torch_index_url=torch_index,
         pretrain_commit=doc["pretrain_commit"],
         repop_commit=doc["repop_commit"],
         files=tuple(files),
@@ -553,6 +575,7 @@ def provision(
             info
             and info.get("commit") == kit.repop_commit
             and replay_entrypoint(venv_dir).is_file()
+            and torch_matches(installed_torch(python), kit.torch_requirement, platform_tag)
         ):
             if on_step:
                 on_step("venv already provisioned for this kit")
@@ -573,29 +596,72 @@ def provision(
             hint=(proc.stderr or proc.stdout).strip()[-500:],
         )
 
-    for wheel in wheels:
+    # Name the exact torch build before repop: its wheel pins only the public
+    # version, so pip would otherwise take PyPI's default CUDA build.
+    # The index carries Linux CUDA builds only; macOS takes its own torch.
+    installs = (
+        [[kit.torch_requirement, "--index-url", kit.torch_index_url]]
+        if kit.torch_index_url and platform_tag == "linux"
+        else []
+    )
+    installs += [[str(staged[w.name])] for w in wheels]
+    for args in installs:
+        label = Path(args[0]).name
         if on_step:
-            on_step(f"installing {wheel.name}")
+            on_step(f"installing {label}")
         proc = subprocess.run(
-            [
-                str(python),
-                "-m",
-                "pip",
-                "install",
-                "--quiet",
-                "--disable-pip-version-check",
-                str(staged[wheel.name]),
-            ],
+            [str(python), "-m", "pip", "install", "--quiet", "--disable-pip-version-check", *args],
             capture_output=True,
             text=True,
             check=False,
         )
         if proc.returncode != 0:
             raise AuditError(
-                f"could not install {wheel.name}",
+                f"could not install {label}",
                 hint=(proc.stderr or proc.stdout).strip()[-900:],
             )
+    if kit.torch_requirement:
+        have = installed_torch(python)
+        if not torch_matches(have, kit.torch_requirement, platform_tag):
+            raise AuditError(
+                f"the audit venv has torch {have}, and the kit pins "
+                f"{kit.torch_requirement.split('==', 1)[-1]}.",
+                hint="A different torch build runs different CUDA kernels, so a replay "
+                f"on it proves nothing. Delete {venv_dir} and re-run.",
+            )
     return python
+
+
+def torch_matches(have: str | None, requirement: str | None, platform_tag: str) -> bool:
+    """Exact match when the pin names a local build on Linux; else the public version.
+
+    Older kits pin ``torch==X`` while Linux pip installs ``X+cuNNN``, and macOS
+    torch never carries a local tag.
+    """
+    if not requirement:
+        return True
+    if have is None:
+        return False
+    want = requirement.split("==", 1)[-1]
+    if "+" in want and platform_tag == "linux":
+        return have == want
+    return have.split("+", 1)[0] == want.split("+", 1)[0]
+
+
+def installed_torch(python: Path) -> str | None:
+    """``torch.__version__`` from inside the venv, local ``+cuXXX`` included."""
+    proc = subprocess.run(
+        [str(python), "-c", "import torch; print(torch.__version__)"],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=300,
+    )
+    return (
+        proc.stdout.strip().splitlines()[-1]
+        if proc.returncode == 0 and proc.stdout.strip()
+        else None
+    )
 
 
 def build_info(python: Path) -> dict:

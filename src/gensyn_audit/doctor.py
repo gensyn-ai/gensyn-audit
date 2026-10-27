@@ -16,6 +16,7 @@ import json
 import math
 import os
 import platform
+import re
 import resource
 import shutil
 import subprocess
@@ -412,7 +413,44 @@ def _check_kit(kit: Kit, venv: Path, device: str) -> list[Check]:
                 "verification claims to cover.",
             )
         )
+    checks.append(_check_torch(python, kit, device))
     return checks
+
+
+def _check_torch(python: Path, kit: Kit, device: str) -> Check:
+    try:
+        have = kitmod.installed_torch(python)
+    except (OSError, subprocess.TimeoutExpired):
+        have = None
+    if have is None:
+        return Check(
+            "torch", FAIL, "not importable", fix=f"Delete {python.parent.parent} and re-run."
+        )
+    tag = "macosx" if sys.platform == "darwin" else "linux"
+    if not kitmod.torch_matches(have, kit.torch_requirement, tag):
+        return Check(
+            "torch",
+            FAIL,
+            have,
+            note=f"kit pins {kit.torch_requirement.split('==', 1)[-1]}",
+            fix="Delete the audit venv and re-run.",
+        )
+    cuda = re.search(r"\+cu(\d\d)", have)
+    if device == "cuda" and cuda:
+        try:
+            smi = _run(["nvidia-smi"], timeout=15) if shutil.which("nvidia-smi") else None
+        except (OSError, subprocess.TimeoutExpired):
+            smi = None
+        driver = re.search(r"CUDA Version:\s*(\d+)", smi.stdout) if smi else None
+        if driver and int(driver[1]) < int(cuda[1]):
+            return Check(
+                "torch",
+                WARN,
+                have,
+                note=f"driver supports CUDA {driver[1]}",
+                fix=f"This torch build needs a driver that runs CUDA {cuda[1]}. Update the NVIDIA driver.",
+            )
+    return Check("torch", PASS, have)
 
 
 #: What audit_replay demands of a checkpoint's descriptor before it will
