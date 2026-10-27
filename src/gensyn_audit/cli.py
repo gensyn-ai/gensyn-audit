@@ -85,7 +85,7 @@ def _resolve_kit(args: argparse.Namespace, manifest=None) -> tuple[kitmod.Kit, k
             "  gensyn-audit run --manifest <url>          # names the kit, record and roots\n"
             "  gensyn-audit run --kit <prefix>            # the kit directly",
         )
-    k = kitmod.load_kit(prefix)
+    k = kitmod.load_kit(prefix, mirror=not (args.kit or "").startswith("gs://"))
     return k, kitmod.load_trajectory(k)
 
 

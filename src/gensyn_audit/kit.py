@@ -88,13 +88,7 @@ class Kit:
 
     @property
     def public_prefix(self) -> str:
-        """Where to read this kit from. The https mirror when there is one.
-
-        A `gs://` kit stays on gs:// (read with ADC): the caller chose it, and
-        the mirror may be an internal bucket that needs headers meant for gs.
-        """
-        if self.prefix.startswith("gs://"):
-            return self.prefix
+        """Where to read this kit from. The https mirror when there is one."""
         return self.public_url_base or self.prefix
 
     @property
@@ -258,7 +252,7 @@ class Trajectory:
 # ── fetching ─────────────────────────────────────────────────────────────────
 
 
-def _raise_not_a_document(uri: str, final_uri: str) -> None:
+def _raise_not_a_document(uri: str, final_uri: str, var: str = "AUDIT_HTTP_HEADERS") -> None:
     """`uri` answered with a web page. Say which wall was hit, and how to pass it."""
     redirected = final_uri and final_uri.split("?", 1)[0] != uri
     where = f"\n  It redirected to {final_uri.split('?', 1)[0]}" if redirected else ""
@@ -267,7 +261,7 @@ def _raise_not_a_document(uri: str, final_uri: str) -> None:
         hint="This is almost always an access gateway asking you to sign in.\n"
         "Staging sits behind Cloudflare Access; production is not expected to.\n"
         "Get a token and put it in the environment:\n"
-        '  export AUDIT_HTTP_HEADERS="cf-access-token: $(cloudflared access token \\\n'
+        f'  export {var}="cf-access-token: $(cloudflared access token \\\n'
         '      -app=https://open1b.gensyn-staging.ai)"\n'
         "Or point --manifest at a record that does not need one.",
     )
@@ -305,7 +299,7 @@ def _read(uri: str, *, kit: bool = False) -> bytes:
                 # their credentials. Nothing this reads is ever HTML: not a
                 # manifest, not kit.json, not a wheel.
                 if resp.headers.get_content_type() == "text/html":
-                    _raise_not_a_document(uri, resp.geturl())
+                    _raise_not_a_document(uri, resp.geturl(), var)
                 return body
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise AuditError(f"could not fetch {uri}: {exc}") from exc
@@ -331,8 +325,12 @@ def _join(prefix: str, name: str) -> str:
     return prefix.rstrip("/") + "/" + name
 
 
-def load_kit(prefix: str) -> Kit:
-    """Read and validate ``<prefix>/kit.json``."""
+def load_kit(prefix: str, *, mirror: bool = True) -> Kit:
+    """Read and validate ``<prefix>/kit.json``.
+
+    `mirror=False` ignores `public_url_base`: a `--kit gs://` the caller chose
+    stays on gs:// (read with ADC), not on a mirror that may need other headers.
+    """
     raw = _read(_join(prefix, "kit.json"), kit=True)
     try:
         doc = json.loads(raw)
@@ -371,7 +369,7 @@ def load_kit(prefix: str) -> Kit:
         repop_commit=doc["repop_commit"],
         files=tuple(files),
         prefix=prefix.rstrip("/"),
-        public_url_base=public,
+        public_url_base=public if mirror else None,
     )
 
 
