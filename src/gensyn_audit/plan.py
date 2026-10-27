@@ -200,6 +200,12 @@ class Workdir:
         return size
 
 
+#: Checkpoints at or above this are 8B-class (96 GB); a 1.6B one is ~19 GB.
+LARGE_CHECKPOINT_GB = 50.0
+#: Host RAM an in-memory 8B replay with the offload flags was measured on.
+IN_MEMORY_HOST_GB = 400.0
+
+
 @dataclass
 class Plan:
     """A fully-resolved replay: what to run, with what environment, where."""
@@ -216,6 +222,12 @@ class Plan:
     """The record's number for this step. `unit.until_step` is the log number."""
     extra_args: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    checkpoint_gb: float | None = None
+    """Predecessor checkpoint size, when the record publishes per-file sizes."""
+
+    @property
+    def streaming(self) -> bool:
+        return "--stream" in self.extra_args
 
     @property
     def is_init(self) -> bool:
@@ -311,6 +323,11 @@ class Plan:
                 "--master-offload-dir",
                 str(self.workdir.scratch / "master"),
             ]
+        # The cross-replica fold spills to /tmp/audit_fold_* unless told
+        # otherwise; keep it with the other scratch. Only for large
+        # checkpoints: older kits' audit_replay may not accept the flag.
+        if self.checkpoint_gb is not None and self.checkpoint_gb >= LARGE_CHECKPOINT_GB:
+            args += ["--fold-spill-dir", str(self.workdir.scratch / "fold")]
         # The per-step losses the record's gate runs on, written atomically
         # after every step so they survive a killed process.
         args += ["--loss-log", str(self.workdir.loss_log)]
@@ -413,6 +430,9 @@ def build(
     run: str = "",
     audit_step: int | None = None,
     extra_args: list[str] | None = None,
+    checkpoint_gb: float | None = None,
+    host_gb: float | None = None,
+    in_memory: bool = False,
 ) -> Plan:
     plan = Plan(
         unit=unit,
@@ -425,7 +445,26 @@ def build(
         run=run or unit.config_name,
         audit_step=audit_step,
         extra_args=list(extra_args or []),
+        checkpoint_gb=checkpoint_gb,
     )
+
+    if (
+        device == "cuda"
+        and not in_memory
+        and not unit.is_init
+        and checkpoint_gb is not None
+        and checkpoint_gb >= LARGE_CHECKPOINT_GB
+        and host_gb is not None
+        and host_gb < IN_MEMORY_HOST_GB
+        and "--stream" not in plan.extra_args
+    ):
+        plan.extra_args = ["--stream", "--fetch-minimal", *plan.extra_args]
+        plan.notes.append(
+            f"This machine has {host_gb:.0f} GiB of host RAM, under the "
+            f"{IN_MEMORY_HOST_GB:.0f} GiB an in-memory replay of a checkpoint this "
+            "size was run with, so --stream --fetch-minimal are added. Streaming is "
+            "about 4.5x slower per micro-batch. Pass --in-memory to refuse it."
+        )
 
     if unit.descriptor_uri:
         plan.notes.append(

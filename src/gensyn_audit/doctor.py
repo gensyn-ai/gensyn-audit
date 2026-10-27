@@ -27,7 +27,7 @@ from pathlib import Path
 from . import kit as kitmod
 from .errors import AuditError
 from .kit import Kit, Unit, build_info
-from .plan import OPEN_FILES, UNSET_VARS, Plan
+from .plan import LARGE_CHECKPOINT_GB, OPEN_FILES, UNSET_VARS, Plan
 
 PASS, FAIL, WARN, SKIP = "pass", "fail", "warn", "skip"
 
@@ -51,6 +51,19 @@ _KIT_DISK_GB = 6.0
 #: parameter's own dtype, so ~1x the model's bf16 weights (~4 GB at 1.6B) is
 #: downloaded with every crowd predecessor and uploaded with every hand-off.
 _INTERVAL_DISK_GB = 68.0
+
+#: Measured on one H100 with an 8B checkpoint (2026-10-27). Stream scratch was
+#: 142.5 GB peak against a 96.4 GB checkpoint; the preflight estimated 146.7.
+_STREAM_SCRATCH_RATIO = 1.52
+#: Host RAM an 8B in-memory replay with the offload flags ran on; streaming's
+#: measured peak anon RAM was 13.4 GiB.
+_LARGE_IN_MEMORY_HOST_GIB = 400.0
+_LARGE_STREAM_HOST_GIB = 13.4
+_LARGE_TIMING = (
+    "per micro-batch, --stream takes about 90 s (8B on one H100: 192 micro-batches, "
+    "5h31m with the step phase) and the in-memory replay about 20 s (288 micro-batches, "
+    "about 1h55m)."
+)
 
 #: The genesis step downloads no predecessor (the start state is regenerated),
 #: so the ~19-26 GB an ordinary interval spends on one is not needed. What
@@ -198,9 +211,50 @@ def _check_genesis_memory(device: str, venv: Path | None) -> Check:
     )
 
 
-def _check_memory(unit: Unit, device: str, venv: Path | None = None) -> Check:
+def _is_large(checkpoint_gb: float | None) -> bool:
+    return checkpoint_gb is not None and checkpoint_gb >= LARGE_CHECKPOINT_GB
+
+
+def _check_large_cuda_memory(streaming: bool) -> Check:
+    host = _memory_gb()
+    if host is None:
+        return Check("memory", WARN, "unknown", "could not read physical memory")
+    value = f"{host:.0f} GiB host"
+    note = (
+        f"--stream: host ~{_LARGE_STREAM_HOST_GIB:.0f} GiB peak, GPU ~21 GB peak"
+        if streaming
+        else f"in-memory: measured on {_LARGE_IN_MEMORY_HOST_GIB:.0f} GiB host with offload flags"
+    )
+    if streaming and host >= _LARGE_STREAM_HOST_GIB * _MEMORY_HEADROOM:
+        return Check("memory", PASS, value, note=note, fix=_LARGE_TIMING)
+    if not streaming and host >= _LARGE_IN_MEMORY_HOST_GIB:
+        return Check("memory", PASS, value, note=note, fix=_LARGE_TIMING)
+    if not streaming:
+        # 400 GiB is the host the run used, not a measured peak: advisory only.
+        return Check(
+            "memory", WARN, value, note=note, fix="Drop --in-memory (auto-stream applies)."
+        )
+    return Check(
+        "memory",
+        FAIL,
+        value,
+        note=note,
+        fix=f"Streaming needs ~{_LARGE_STREAM_HOST_GIB * _MEMORY_HEADROOM:.0f} GiB host RAM.",
+    )
+
+
+def _check_memory(
+    unit: Unit,
+    device: str,
+    venv: Path | None = None,
+    *,
+    checkpoint_gb: float | None = None,
+    streaming: bool = False,
+) -> Check:
     if unit.is_genesis:
         return _check_genesis_memory(device, venv)
+    if device == "cuda" and _is_large(checkpoint_gb):
+        return _check_large_cuda_memory(streaming)
     if device != "mps":
         return Check("memory", SKIP, "n/a")
     have = _memory_gb()
@@ -262,7 +316,9 @@ def _already_on_disk_gb(workdir: Path) -> float:
     return total / 1024**3
 
 
-def _check_disk(workdir: Path, unit: Unit) -> Check:
+def _check_disk(
+    workdir: Path, unit: Unit, *, checkpoint_gb: float | None = None, streaming: bool = False
+) -> Check:
     probe = workdir
     while not probe.exists() and probe != probe.parent:
         probe = probe.parent
@@ -277,6 +333,13 @@ def _check_disk(workdir: Path, unit: Unit) -> Check:
         need = _KIT_DISK_GB + _GENESIS_DISK_GB
     else:
         need = _KIT_DISK_GB + _INTERVAL_DISK_GB
+        if checkpoint_gb:
+            # Predecessor + hand-off at the same size, plus stream scratch;
+            # never below the fixed figure, which also budgets shards/spill.
+            need = max(
+                need,
+                _KIT_DISK_GB + checkpoint_gb * (2 + (_STREAM_SCRATCH_RATIO if streaming else 0)),
+            )
     have_gb = 0.0 if unit.is_init else _already_on_disk_gb(workdir)
     need = max(need - have_gb, _KIT_DISK_GB)
     resumed = f", {have_gb:.0f} GB already fetched" if have_gb >= 1 else ""
@@ -707,8 +770,19 @@ def run_checks(plan: Plan, *, deep: bool = True, ctx=None, for_replay: bool = Tr
     ]
     if for_replay:
         checks[1:1] = [
-            _check_memory(plan.unit, plan.device, plan.venv),
-            _check_disk(plan.workdir.root, plan.unit),
+            _check_memory(
+                plan.unit,
+                plan.device,
+                plan.venv,
+                checkpoint_gb=plan.checkpoint_gb,
+                streaming=plan.streaming,
+            ),
+            _check_disk(
+                plan.workdir.root,
+                plan.unit,
+                checkpoint_gb=plan.checkpoint_gb,
+                streaming=plan.streaming,
+            ),
         ]
     if deep:
         checks += _check_kit(plan.kit, plan.venv, plan.device)
