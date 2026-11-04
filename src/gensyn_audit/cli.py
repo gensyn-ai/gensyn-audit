@@ -1413,7 +1413,8 @@ def _not_published_yet(uri: str | None) -> AuditError:
         "auditor's upload, which stays quarantined until it passes the\n"
         "loss and digest checks. Re-check the step, or take one whose\n"
         "predecessor is already published:\n"
-        "  a position-1 step is one where the audit step divides by 100.",
+        "  a position-1 step is the first of its segment (a multiple of the\n"
+        "  run's segment length: 100 on open-1b, 500 on open-8b).",
     )
 
 
