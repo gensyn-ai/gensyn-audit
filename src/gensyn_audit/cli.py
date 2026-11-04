@@ -25,7 +25,7 @@ from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
-from . import __version__, brand, doctor, fetch, runner
+from . import __version__, brand, doctor, fetch, gcs, runner
 from . import commitments as commitmentsmod
 from . import convert as convertmod
 from . import handoffs as handoffs_mod
@@ -368,6 +368,29 @@ def _workdir(args: argparse.Namespace, unit: kitmod.Unit) -> Path:
     return Path.cwd() / f"audit-{slug}"
 
 
+def _checkpoint_gb(ctx, unit) -> float | None:
+    """Size in decimal GB of the checkpoint the replay downloads, or None when unknown.
+
+    The record's per-file sizes when it publishes them; otherwise GCS: the
+    listing of a directory URI, or the metadata of a single-object crowd
+    hand-off. Genesis downloads none. An unreachable bucket is not fatal:
+    it means "unknown".
+    """
+    if not ctx or unit.is_genesis:
+        return None
+    total = sum(f.bytes for f in ctx.predecessor.artifact_files)
+    uri = unit.checkpoint_uri or ctx.predecessor.uri
+    if not total and uri and uri.startswith("gs://"):
+        try:
+            if uri.endswith("/"):
+                total = sum(o["size"] for o in gcs.list_prefix(uri))
+            else:
+                total = gcs.object_size(uri)
+        except AuditError:
+            return None
+    return total / 1e9 or None
+
+
 def _build_plan(args: argparse.Namespace, record=None, manifest=None):
     """Returns (plan, kit, step_context|None)."""
     if manifest is None:
@@ -413,6 +436,9 @@ def _build_plan(args: argparse.Namespace, record=None, manifest=None):
                 else (getattr(args, "run", None) or (manifest.run if manifest else ""))
             ),
             extra_args=getattr(args, "extra", None) or [],
+            checkpoint_gb=_checkpoint_gb(ctx, unit),
+            host_gb=doctor._memory_gb(),
+            in_memory=getattr(args, "in_memory", False),
         ),
         k,
         ctx,
@@ -2250,6 +2276,12 @@ def _kit_flags(p: argparse.ArgumentParser) -> None:
     p.add_argument("--device", default=_DEFAULT_DEVICE, choices=["mps", "cuda", "cpu"])
     p.add_argument("--workdir")
     p.add_argument(
+        "--in-memory",
+        action="store_true",
+        help="on CUDA or MPS, never add --stream --fetch-minimal for a large checkpoint "
+        "on a host with under 400 GiB RAM (faster, but needs the RAM)",
+    )
+    p.add_argument(
         "--manifest",
         help="run manifest: names the kit, the record and the artifact "
         "roots, so no location is compiled into this tool",
@@ -2311,6 +2343,11 @@ def build_parser() -> argparse.ArgumentParser:
     _kit_flags(pl)
     pl.add_argument("--no-handoff", action="store_true")
     pl.add_argument("--checkpoint")
+    pl.add_argument(
+        "--extra",
+        nargs=argparse.REMAINDER,
+        help="everything after this is passed to audit_replay verbatim",
+    )
     pl.set_defaults(func=cmd_plan)
 
     i = sub.add_parser("install", help="stage and install the kit's wheels", parents=[common])

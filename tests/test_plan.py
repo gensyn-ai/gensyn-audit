@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 from conftest import INIT_HASH
@@ -378,7 +379,13 @@ def test_the_headroom_checks_are_dropped_when_no_replay_will_start(tmp_path):
         predecessor_step=102,
     )
     plan = SimpleNamespace(
-        device="cpu", unit=unit, workdir=Workdir(tmp_path), kit=None, venv=tmp_path / "venv"
+        device="cpu",
+        unit=unit,
+        workdir=Workdir(tmp_path),
+        kit=None,
+        venv=tmp_path / "venv",
+        checkpoint_gb=None,
+        streaming=False,
     )
 
     sizing = {"memory", "free disk"}
@@ -388,3 +395,39 @@ def test_the_headroom_checks_are_dropped_when_no_replay_will_start(tmp_path):
     assert sizing <= replaying, "a real replay must still be sized"
     assert not (sizing & reporting)
     assert replaying - sizing == reporting, "nothing else may be skipped"
+
+
+def test_fold_spill_goes_to_scratch(kit_dir, tmp_path):
+    assert "--fold-spill-dir" not in _plan(kit_dir, tmp_path, unit=_interval_unit()).argv()
+    plan = _plan(kit_dir, tmp_path, unit=_interval_unit(), device="cuda", checkpoint_gb=96.4)
+    argv = plan.argv()
+    assert argv[argv.index("--fold-spill-dir") + 1] == str(plan.workdir.scratch / "fold")
+
+
+def test_large_cuda_checkpoint_on_small_host_streams(kit_dir, tmp_path):
+    kw = {"unit": _interval_unit(), "device": "cuda", "checkpoint_gb": 96.4}
+    assert _plan(kit_dir, tmp_path, host_gb=96, **kw).streaming
+    assert not _plan(kit_dir, tmp_path, host_gb=512, **kw).streaming
+    assert not _plan(kit_dir, tmp_path, host_gb=96, in_memory=True, **kw).streaming
+
+
+def test_fetch_minimal_only_with_gcs_root_and_mps_streams(kit_dir, tmp_path):
+    unit = _interval_unit()
+    argv = _plan(kit_dir, tmp_path, unit=unit, device="mps", checkpoint_gb=96.4, host_gb=48).argv()
+    assert "--stream" in argv
+    assert ("--fetch-minimal" in argv) == bool(unit.gcs_root)
+    bare = replace(unit, gcs_root=None)
+    argv = _plan(kit_dir, tmp_path, unit=bare, device="cuda", checkpoint_gb=96.4, host_gb=96).argv()
+    assert "--stream" in argv and "--fetch-minimal" not in argv
+
+
+def test_checkpoint_gb_sizes_a_single_object_handoff_and_skips_genesis(monkeypatch):
+    from types import SimpleNamespace as NS
+
+    from gensyn_audit import cli, gcs
+
+    ctx = NS(predecessor=NS(artifact_files=[], uri="gs://b/ckpt/other/"))
+    unit = NS(is_genesis=False, checkpoint_uri="gs://b/handoffs/step_1/handoff.safetensors")
+    monkeypatch.setattr(gcs, "object_size", lambda uri: 96_400_000_000)
+    assert cli._checkpoint_gb(ctx, unit) == 96.4
+    assert cli._checkpoint_gb(ctx, NS(is_genesis=True, checkpoint_uri=None)) is None

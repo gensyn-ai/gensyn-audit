@@ -365,6 +365,20 @@ def list_prefix(uri: str, creds: Credentials | None = None) -> list[dict]:
             return out
 
 
+def object_size(uri: str, creds: Credentials | None = None) -> int:
+    """Size in bytes of one object, from its metadata."""
+    creds = creds or credentials()
+    obj = parse(uri)
+    url = f"{API}/b/{obj.bucket}/o/{urllib.parse.quote(obj.name, safe='')}?fields=size"
+    try:
+        with _request(url, creds) as resp:
+            return int(json.load(resp)["size"])
+    except urllib.error.HTTPError as exc:
+        raise _explain(exc, uri, creds) from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise AuditError(f"could not size {uri}: {exc}") from exc
+
+
 def download(
     uri: str,
     dest: Path,
