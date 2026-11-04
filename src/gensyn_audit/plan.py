@@ -223,7 +223,7 @@ class Plan:
     extra_args: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     checkpoint_gb: float | None = None
-    """Predecessor checkpoint size, when the record publishes per-file sizes."""
+    """Predecessor checkpoint size in decimal GB, when known (record sizes or GCS)."""
 
     @property
     def streaming(self) -> bool:
@@ -454,19 +454,27 @@ def build(
         and not unit.is_init
         and checkpoint_gb is not None
         and checkpoint_gb >= LARGE_CHECKPOINT_GB
-        and host_gb is not None
-        and host_gb < IN_MEMORY_HOST_GB
+        # From init nothing can be offloaded, so a big host does not make the
+        # in-memory replay fit the card: the first step streams on any host.
+        and (unit.is_genesis or (host_gb is not None and host_gb < IN_MEMORY_HOST_GB))
         and "--stream" not in plan.extra_args
     ):
         # audit_replay rejects --fetch-minimal without --gcs-root.
         added = ["--stream"] + (["--fetch-minimal"] if unit.gcs_root else [])
         plan.extra_args = [*added, *plan.extra_args]
-        plan.notes.append(
-            f"This machine has {host_gb:.0f} GiB of host RAM, under the "
-            f"{IN_MEMORY_HOST_GB:.0f} GiB an in-memory replay of a checkpoint this "
-            f"size was run with, so {' '.join(added)} added. Streaming is "
-            "about 4.5x slower per micro-batch. Pass --in-memory to refuse it."
-        )
+        if unit.is_genesis:
+            plan.notes.append(
+                f"This run's state is {checkpoint_gb:.0f} GB, and from init the "
+                f"optimizer cannot be offloaded, so {' '.join(added)} added on any "
+                "host. Pass --in-memory to refuse it."
+            )
+        else:
+            plan.notes.append(
+                f"This machine has {host_gb:.0f} GiB of host RAM, under the "
+                f"{IN_MEMORY_HOST_GB:.0f} GiB an in-memory replay of a checkpoint this "
+                f"size was run with, so {' '.join(added)} added. Streaming is "
+                "about 4.5x slower per micro-batch. Pass --in-memory to refuse it."
+            )
 
     if unit.descriptor_uri:
         plan.notes.append(

@@ -368,31 +368,44 @@ def _workdir(args: argparse.Namespace, unit: kitmod.Unit) -> Path:
     return Path.cwd() / f"audit-{slug}"
 
 
-def _checkpoint_gb(ctx) -> float | None:
-    """Predecessor checkpoint size in decimal GB, or None when unknown.
+def _genesis_state_gb(unit) -> float | None:
+    """Size in decimal GB of the state a genesis step regenerates, or None.
 
-    The record's per-file sizes when it publishes them; otherwise the GCS
-    listing of the predecessor prefix. A packed single-object hand-off lists
-    as empty, and an unreachable bucket is not fatal: both mean "unknown".
+    Nothing is downloaded for the run's first step, but the state it rebuilds
+    is the size of the run's checkpoints, and its descriptor (the unit's
+    `checkpoint_uri`) is one: the listing sizes the replay and decides whether
+    it streams. Unreachable or not on GCS means "unknown".
+    """
+    uri = unit.checkpoint_uri
+    if not uri or not uri.startswith("gs://"):
+        return None
+    try:
+        return sum(o["size"] for o in gcs.list_prefix(uri)) / 1e9 or None
+    except AuditError:
+        return None
+
+
+def _checkpoint_gb(ctx, unit) -> float | None:
+    """Size in decimal GB of the checkpoint the replay downloads, or None when unknown.
+
+    The record's per-file sizes when it publishes them; otherwise GCS: the
+    listing of a directory URI, or the metadata of a single-object crowd
+    hand-off. Genesis downloads none, so it is sized by the state it
+    regenerates (`_genesis_state_gb`). An unreachable bucket is not fatal:
+    it means "unknown".
     """
     if not ctx:
         return None
-    pred = ctx.predecessor
-    if pred.genesis is not None:
-        # Nothing is downloaded for the run's first step, but the state it
-        # regenerates is the size of the run's checkpoints, and the descriptor
-        # is one: its listing sizes the replay (and decides whether it streams).
-        uri = pred.genesis.descriptor_uri
-        if not uri.startswith("gs://"):
-            return None
+    if unit.is_genesis:
+        return _genesis_state_gb(unit)
+    total = sum(f.bytes for f in ctx.predecessor.artifact_files)
+    uri = unit.checkpoint_uri or ctx.predecessor.uri
+    if not total and uri and uri.startswith("gs://"):
         try:
-            return sum(o["size"] for o in gcs.list_prefix(uri)) / 1e9 or None
-        except AuditError:
-            return None
-    total = sum(f.bytes for f in pred.artifact_files)
-    if not total and pred.uri and pred.uri.startswith("gs://"):
-        try:
-            total = sum(o["size"] for o in gcs.list_prefix(pred.uri))
+            if uri.endswith("/"):
+                total = sum(o["size"] for o in gcs.list_prefix(uri))
+            else:
+                total = gcs.object_size(uri)
         except AuditError:
             return None
     return total / 1e9 or None
@@ -443,7 +456,7 @@ def _build_plan(args: argparse.Namespace, record=None, manifest=None):
                 else (getattr(args, "run", None) or (manifest.run if manifest else ""))
             ),
             extra_args=getattr(args, "extra", None) or [],
-            checkpoint_gb=_checkpoint_gb(ctx),
+            checkpoint_gb=_checkpoint_gb(ctx, unit),
             host_gb=doctor._memory_gb(),
             in_memory=getattr(args, "in_memory", False),
         ),
@@ -1446,7 +1459,8 @@ def _not_published_yet(uri: str | None) -> AuditError:
         "auditor's upload, which stays quarantined until it passes the\n"
         "loss and digest checks. Re-check the step, or take one whose\n"
         "predecessor is already published:\n"
-        "  a position-1 step is one where the audit step divides by 100.",
+        "  a position-1 step is the first of its segment (a multiple of the\n"
+        "  run's segment length: 100 on open-1b, 500 on open-8b).",
     )
 
 

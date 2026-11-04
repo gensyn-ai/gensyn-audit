@@ -282,3 +282,21 @@ def test_composite_objects_force_the_crc32c_path():
     composite = {"crc32c": b"abcd"}  # no md5, as GCS reports for these
     _, _, algo = gcs._hasher(composite)
     assert algo == "crc32c"
+
+
+def test_object_size_reads_one_object_metadata(monkeypatch):
+    seen = []
+
+    class Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self, *a):
+            return b'{"size": "25700000000"}'
+
+    monkeypatch.setattr(gcs, "_request", lambda url, creds, **kw: seen.append(url) or Resp())
+    assert gcs.object_size("gs://b/handoffs/step_1/handoff.safetensors", object()) == 25_700_000_000
+    assert "/o/handoffs%2Fstep_1%2Fhandoff.safetensors?" in seen[0]

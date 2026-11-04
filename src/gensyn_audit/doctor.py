@@ -59,6 +59,11 @@ _STREAM_SCRATCH_RATIO = 1.52
 #: measured peak anon RAM was 13.4 GiB.
 _LARGE_IN_MEMORY_HOST_GIB = 400.0
 _LARGE_STREAM_HOST_GIB = 13.4
+#: Apple silicon: the GPU shares the memory, so host (~13.4) plus GPU (~21 GB).
+_LARGE_MPS_GIB = 34.0
+_LARGE_MPS_TIMING = (
+    "on a 48 GB M5 Pro with --stream, the measured 8B main-phase step took 16h44m."
+)
 _LARGE_TIMING = (
     "per micro-batch, --stream takes about 90 s (8B on one H100: 192 micro-batches, "
     "5h31m with the step phase) and the in-memory replay about 20 s (288 micro-batches, "
@@ -222,21 +227,57 @@ def _is_large(checkpoint_gb: float | None) -> bool:
     return checkpoint_gb is not None and checkpoint_gb >= LARGE_CHECKPOINT_GB
 
 
-def _check_large_cuda_memory(streaming: bool, *, genesis: bool = False) -> Check:
+def _check_large_mps_memory() -> Check:
     host = _memory_gb()
     if host is None:
         return Check("memory", WARN, "unknown", "could not read physical memory")
-    value = f"{host:.0f} GiB host"
-    if genesis and not streaming:
-        # From init the optimizer cannot be offloaded, so the fp32 master and
-        # moments sit on the device at once: 96 GB at 8B, over any one card.
+    value = f"{host:.0f} GiB unified memory"
+    note = f"--stream: host ~{_LARGE_STREAM_HOST_GIB:.0f} GiB plus GPU ~21 GB share this pool"
+    if host < _LARGE_MPS_GIB:
         return Check(
             "memory",
             FAIL,
             value,
-            note="in-memory from-init holds the fp32 master and AdamW moments at once",
-            fix="Drop --in-memory: the first step of a run this size only fits streamed.",
+            note=note,
+            fix=f"An 8B replay needs ~{_LARGE_MPS_GIB:.0f} GiB unified memory; "
+            "the only measured Mac run used 48 GB.",
         )
+    return Check("memory", PASS, value, note=note, fix=_LARGE_MPS_TIMING)
+
+
+#: An in-memory from-init replay of an 8B-class run cannot offload: the fp32
+#: master (4 B/param) and AdamW moments (8 B/param) are resident together, 96 GB
+#: at 8B, before the bf16 grad model, gradients and fold. Unmeasured; on Apple
+#: silicon below this the replay cannot fit at all.
+_LARGE_GENESIS_IN_MEMORY_GIB = 192.0
+
+
+def _check_large_genesis_in_memory(device: str) -> Check:
+    """`--in-memory` on the first step of an 8B-class run. The plan streams it
+    otherwise, on any host: from init there is no offload, so host RAM does not
+    help the card, and the in-memory path is unmeasured everywhere."""
+    host = _memory_gb()
+    note = (
+        "in-memory from-init cannot offload: the fp32 master and AdamW moments "
+        "(96 GB at 8B) are resident together"
+    )
+    fix = "Run without --in-memory: the tool streams this step."
+    if device == "cuda":
+        value = "unknown" if host is None else f"{host:.0f} GiB host"
+        return Check("memory", FAIL, value, note=note + ", on one card", fix=fix)
+    if host is None:
+        return Check("memory", WARN, "unknown", "could not read physical memory", fix=fix)
+    value = f"{host:.0f} GiB unified memory"
+    if host < _LARGE_GENESIS_IN_MEMORY_GIB:
+        return Check("memory", FAIL, value, note=note, fix=fix)
+    return Check("memory", WARN, value, note=note + "; not measured on any Mac", fix=fix)
+
+
+def _check_large_cuda_memory(streaming: bool) -> Check:
+    host = _memory_gb()
+    if host is None:
+        return Check("memory", WARN, "unknown", "could not read physical memory")
+    value = f"{host:.0f} GiB host"
     note = (
         f"--stream: host ~{_LARGE_STREAM_HOST_GIB:.0f} GiB peak, GPU ~21 GB peak"
         if streaming
@@ -270,7 +311,9 @@ def _check_memory(
 ) -> Check:
     if device in ("cuda", "mps") and _is_large(checkpoint_gb):
         # Genesis included: streamed, it holds no more than a later step.
-        return _check_large_cuda_memory(streaming, genesis=unit.is_genesis)
+        if unit.is_genesis and not streaming:
+            return _check_large_genesis_in_memory(device)
+        return _check_large_mps_memory() if device == "mps" else _check_large_cuda_memory(streaming)
     if unit.is_genesis:
         return _check_genesis_memory(device, venv)
     if device != "mps":

@@ -40,3 +40,48 @@ def test_the_codes_the_record_actually_returns_are_explained():
 
     assert "--claim" in _ERROR_GUIDANCE["no_token"]
     assert "not your" in _ERROR_GUIDANCE["bad_request"]
+
+
+# ── a run that is still training ─────────────────────────────────────────────
+
+
+def _refusal(status: int, body: dict, method: str = "GET", path: str = "/v1/runs/open-8b/x"):
+    import io
+    import json
+    import urllib.error
+
+    from gensyn_audit.record import _api_error
+
+    raw = io.BytesIO(json.dumps(body).encode())
+    return _api_error(urllib.error.HTTPError("u", status, "", {}, raw), method, path)
+
+
+def test_a_step_past_the_published_segments_says_so_rather_than_refused():
+    """open-8b opens for audit while it trains. Past `publishedSegments` the
+    record answers 404 (receipt, segment, anchor) or 409 (claim) with
+    `not_published`; that is a wait, not a broken request or a bad token."""
+    err = _refusal(
+        404,
+        {
+            "error": "not_published",
+            "detail": "That segment is not published yet: the run is still training.",
+            "segment": 2,
+            "publishedSegments": 2,
+        },
+        path="/v1/runs/open-8b/steps/1000/receipt",
+    )
+    assert (
+        str(err) == "that step is not open to audit yet: segment 2 is past the 2 published so far."
+    )
+    assert "still training" in (err.hint or "")
+    assert "the run is still training." in (err.hint or "")
+    assert "refused" not in str(err)
+
+    claim = _refusal(409, {"error": "not_published", "detail": "x"}, method="POST")
+    assert str(claim) == "that step is not open to audit yet."
+    assert (claim.hint or "").endswith("\nx")
+
+
+def test_other_refusals_keep_their_shape():
+    err = _refusal(401, {"error": "bad_token", "detail": "no"})
+    assert str(err) == "GET /v1/runs/open-8b/x was refused (401 bad_token)."

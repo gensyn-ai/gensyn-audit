@@ -438,8 +438,27 @@ def test_an_8b_genesis_step_streams_from_init(tmp_path, device):
     assert any("one parameter at a time" in n for n in plan.notes)
 
 
+@pytest.mark.parametrize("device", ["cuda", "mps"])
+def test_an_8b_genesis_step_streams_on_a_big_host_too(tmp_path, device):
+    """From init nothing is offloaded, so 1 TiB of host RAM does not make the
+    in-memory replay fit: the first step streams anyway, and preflight agrees."""
+    plan = _large_plan(tmp_path, device=device, host_gb=1024)
+    assert plan.streaming and "--stream" in plan.argv()
+    assert any("from init the optimizer cannot be offloaded" in n for n in plan.notes)
+
+
 def test_a_1b_genesis_step_stays_in_memory(tmp_path):
-    plan = _plan(tmp_path, device="cuda")
+    # OPEN-1B's descriptor (step_000000100) lists at ~19 GB; a 48 GiB Mac-sized host.
+    plan = plan_mod.build(
+        unit=_genesis_unit(),
+        kit=_kit(),
+        workdir=tmp_path / "wd",
+        venv=tmp_path / "venv",
+        device="cuda",
+        audit_step=0,
+        checkpoint_gb=19.0,
+        host_gb=48,
+    )
     assert not plan.streaming and "--stream" not in plan.argv()
     assert any("needs more memory than a later step" in n for n in plan.notes)
 
@@ -454,11 +473,32 @@ def test_a_streamed_8b_genesis_step_is_sized_like_a_streamed_interval(monkeypatc
     assert "need ~346 GB" in disk.note
 
 
-def test_an_8b_genesis_step_in_memory_is_refused(monkeypatch):
-    monkeypatch.setattr(doctor, "_memory_gb", lambda: 512.0)
+def test_an_8b_genesis_step_in_memory_is_refused_on_cuda(monkeypatch, tmp_path):
+    """Only --in-memory gets here (the plan streams it otherwise), and the fix
+    says to drop exactly that."""
+    monkeypatch.setattr(doctor, "_memory_gb", lambda: 1024.0)
+    plan = _large_plan(tmp_path, host_gb=1024, in_memory=True)
+    assert not plan.streaming
+    check = doctor._check_memory(plan.unit, "cuda", checkpoint_gb=96.4, streaming=False)
+    assert check.status == doctor.FAIL and "without --in-memory" in check.fix
+
+
+@pytest.mark.parametrize(("host", "status"), [(48.0, "fail"), (512.0, "warn")])
+def test_an_8b_genesis_step_in_memory_on_a_mac_is_sized_not_refused(monkeypatch, host, status):
+    """Unified memory can hold the in-memory replay on a big enough Mac; it is
+    unmeasured, so it warns there, and fails where it cannot fit at all."""
+    monkeypatch.setattr(doctor, "_memory_gb", lambda: host)
     unit = _genesis_unit(checkpoint_uri=OPEN8B_DESCRIPTOR)
-    check = doctor._check_memory(unit, "cuda", checkpoint_gb=96.4, streaming=False)
-    assert check.status == doctor.FAIL and "--in-memory" in check.fix
+    check = doctor._check_memory(unit, "mps", checkpoint_gb=96.4, streaming=False)
+    assert check.status == status
+
+
+def test_a_streamed_8b_genesis_step_on_a_big_cuda_host_passes(monkeypatch):
+    monkeypatch.setattr(doctor, "_memory_gb", lambda: 1024.0)
+    unit = _genesis_unit(checkpoint_uri=OPEN8B_DESCRIPTOR)
+    assert (
+        doctor._check_memory(unit, "cuda", checkpoint_gb=96.4, streaming=True).status == doctor.PASS
+    )
 
 
 def test_the_descriptor_listing_sizes_a_genesis_step(monkeypatch):
@@ -481,14 +521,15 @@ def test_the_descriptor_listing_sizes_a_genesis_step(monkeypatch):
         return [{"size": 48_200_000_000}, {"size": 48_200_000_000}]
 
     monkeypatch.setattr(cli.gcs, "list_prefix", fake_list)
-    assert cli._checkpoint_gb(ctx) == pytest.approx(96.4)
+    unit = cli._unit_from_step(ctx, StepRef.from_audit(0), _args(), None, None, STEP1_HASH)
+    assert cli._checkpoint_gb(ctx, unit) == pytest.approx(96.4)
     assert listed == [OPEN8B_DESCRIPTOR]
 
     def unreachable(uri):
         raise AuditError("no listing")
 
     monkeypatch.setattr(cli.gcs, "list_prefix", unreachable)
-    assert cli._checkpoint_gb(ctx) is None
+    assert cli._checkpoint_gb(ctx, unit) is None
 
 
 # ── the init gate is not the audit's verdict ─────────────────────────────────
