@@ -253,7 +253,7 @@ def _check_memory(
 ) -> Check:
     if unit.is_genesis:
         return _check_genesis_memory(device, venv)
-    if device == "cuda" and _is_large(checkpoint_gb):
+    if device in ("cuda", "mps") and _is_large(checkpoint_gb):
         return _check_large_cuda_memory(streaming)
     if device != "mps":
         return Check("memory", SKIP, "n/a")

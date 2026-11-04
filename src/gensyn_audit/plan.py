@@ -200,7 +200,7 @@ class Workdir:
         return size
 
 
-#: Checkpoints at or above this are 8B-class (96 GB); a 1.6B one is ~19 GB.
+#: Decimal GB (1e9 bytes). Checkpoints at or above this are 8B-class (96.4 GB); a 1.6B one is ~19 GB.
 LARGE_CHECKPOINT_GB = 50.0
 #: Host RAM an in-memory 8B replay with the offload flags was measured on.
 IN_MEMORY_HOST_GB = 400.0
@@ -449,7 +449,7 @@ def build(
     )
 
     if (
-        device == "cuda"
+        device in ("cuda", "mps")
         and not in_memory
         and not unit.is_init
         and checkpoint_gb is not None
@@ -458,11 +458,13 @@ def build(
         and host_gb < IN_MEMORY_HOST_GB
         and "--stream" not in plan.extra_args
     ):
-        plan.extra_args = ["--stream", "--fetch-minimal", *plan.extra_args]
+        # audit_replay rejects --fetch-minimal without --gcs-root.
+        added = ["--stream"] + (["--fetch-minimal"] if unit.gcs_root else [])
+        plan.extra_args = [*added, *plan.extra_args]
         plan.notes.append(
             f"This machine has {host_gb:.0f} GiB of host RAM, under the "
             f"{IN_MEMORY_HOST_GB:.0f} GiB an in-memory replay of a checkpoint this "
-            "size was run with, so --stream --fetch-minimal are added. Streaming is "
+            f"size was run with, so {' '.join(added)} added. Streaming is "
             "about 4.5x slower per micro-batch. Pass --in-memory to refuse it."
         )
 

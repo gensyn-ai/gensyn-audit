@@ -25,7 +25,7 @@ from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
-from . import __version__, brand, doctor, fetch, runner
+from . import __version__, brand, doctor, fetch, gcs, runner
 from . import commitments as commitmentsmod
 from . import convert as convertmod
 from . import handoffs as handoffs_mod
@@ -368,6 +368,25 @@ def _workdir(args: argparse.Namespace, unit: kitmod.Unit) -> Path:
     return Path.cwd() / f"audit-{slug}"
 
 
+def _checkpoint_gb(ctx) -> float | None:
+    """Predecessor checkpoint size in decimal GB, or None when unknown.
+
+    The record's per-file sizes when it publishes them; otherwise the GCS
+    listing of the predecessor prefix. A packed single-object hand-off lists
+    as empty, and an unreachable bucket is not fatal: both mean "unknown".
+    """
+    if not ctx:
+        return None
+    pred = ctx.predecessor
+    total = sum(f.bytes for f in pred.artifact_files)
+    if not total and pred.uri and pred.uri.startswith("gs://"):
+        try:
+            total = sum(o["size"] for o in gcs.list_prefix(pred.uri))
+        except AuditError:
+            return None
+    return total / 1e9 or None
+
+
 def _build_plan(args: argparse.Namespace, record=None, manifest=None):
     """Returns (plan, kit, step_context|None)."""
     if manifest is None:
@@ -413,11 +432,7 @@ def _build_plan(args: argparse.Namespace, record=None, manifest=None):
                 else (getattr(args, "run", None) or (manifest.run if manifest else ""))
             ),
             extra_args=getattr(args, "extra", None) or [],
-            checkpoint_gb=(
-                sum(f.bytes for f in ctx.predecessor.artifact_files) / 1024**3 or None
-                if ctx
-                else None
-            ),
+            checkpoint_gb=_checkpoint_gb(ctx),
             host_gb=doctor._memory_gb(),
             in_memory=getattr(args, "in_memory", False),
         ),
@@ -2258,7 +2273,7 @@ def _kit_flags(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--in-memory",
         action="store_true",
-        help="on CUDA, never add --stream --fetch-minimal for a large checkpoint "
+        help="on CUDA or MPS, never add --stream --fetch-minimal for a large checkpoint "
         "on a host with under 400 GiB RAM (faster, but needs the RAM)",
     )
     p.add_argument(
