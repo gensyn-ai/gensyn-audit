@@ -59,6 +59,11 @@ _STREAM_SCRATCH_RATIO = 1.52
 #: measured peak anon RAM was 13.4 GiB.
 _LARGE_IN_MEMORY_HOST_GIB = 400.0
 _LARGE_STREAM_HOST_GIB = 13.4
+#: Apple silicon: the GPU shares the memory, so host (~13.4) plus GPU (~21 GB).
+_LARGE_MPS_GIB = 34.0
+_LARGE_MPS_TIMING = (
+    "on a 48 GB M5 Pro with --stream, the measured 8B main-phase step took 16h44m."
+)
 _LARGE_TIMING = (
     "per micro-batch, --stream takes about 90 s (8B on one H100: 192 micro-batches, "
     "5h31m with the step phase) and the in-memory replay about 20 s (288 micro-batches, "
@@ -215,6 +220,24 @@ def _is_large(checkpoint_gb: float | None) -> bool:
     return checkpoint_gb is not None and checkpoint_gb >= LARGE_CHECKPOINT_GB
 
 
+def _check_large_mps_memory() -> Check:
+    host = _memory_gb()
+    if host is None:
+        return Check("memory", WARN, "unknown", "could not read physical memory")
+    value = f"{host:.0f} GiB unified memory"
+    note = f"--stream: host ~{_LARGE_STREAM_HOST_GIB:.0f} GiB plus GPU ~21 GB share this pool"
+    if host < _LARGE_MPS_GIB:
+        return Check(
+            "memory",
+            FAIL,
+            value,
+            note=note,
+            fix=f"An 8B replay needs ~{_LARGE_MPS_GIB:.0f} GiB unified memory; "
+            "the only measured Mac run used 48 GB.",
+        )
+    return Check("memory", PASS, value, note=note, fix=_LARGE_MPS_TIMING)
+
+
 def _check_large_cuda_memory(streaming: bool) -> Check:
     host = _memory_gb()
     if host is None:
@@ -254,7 +277,7 @@ def _check_memory(
     if unit.is_genesis:
         return _check_genesis_memory(device, venv)
     if device in ("cuda", "mps") and _is_large(checkpoint_gb):
-        return _check_large_cuda_memory(streaming)
+        return _check_large_mps_memory() if device == "mps" else _check_large_cuda_memory(streaming)
     if device != "mps":
         return Check("memory", SKIP, "n/a")
     have = _memory_gb()

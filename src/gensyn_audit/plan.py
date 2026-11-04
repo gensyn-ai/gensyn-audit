@@ -223,7 +223,7 @@ class Plan:
     extra_args: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     checkpoint_gb: float | None = None
-    """Predecessor checkpoint size, when the record publishes per-file sizes."""
+    """Predecessor checkpoint size in decimal GB, when known (record sizes or GCS)."""
 
     @property
     def streaming(self) -> bool:

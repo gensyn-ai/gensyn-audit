@@ -368,20 +368,24 @@ def _workdir(args: argparse.Namespace, unit: kitmod.Unit) -> Path:
     return Path.cwd() / f"audit-{slug}"
 
 
-def _checkpoint_gb(ctx) -> float | None:
-    """Predecessor checkpoint size in decimal GB, or None when unknown.
+def _checkpoint_gb(ctx, unit) -> float | None:
+    """Size in decimal GB of the checkpoint the replay downloads, or None when unknown.
 
-    The record's per-file sizes when it publishes them; otherwise the GCS
-    listing of the predecessor prefix. A packed single-object hand-off lists
-    as empty, and an unreachable bucket is not fatal: both mean "unknown".
+    The record's per-file sizes when it publishes them; otherwise GCS: the
+    listing of a directory URI, or the metadata of a single-object crowd
+    hand-off. Genesis downloads none. An unreachable bucket is not fatal:
+    it means "unknown".
     """
-    if not ctx:
+    if not ctx or unit.is_genesis:
         return None
-    pred = ctx.predecessor
-    total = sum(f.bytes for f in pred.artifact_files)
-    if not total and pred.uri and pred.uri.startswith("gs://"):
+    total = sum(f.bytes for f in ctx.predecessor.artifact_files)
+    uri = unit.checkpoint_uri or ctx.predecessor.uri
+    if not total and uri and uri.startswith("gs://"):
         try:
-            total = sum(o["size"] for o in gcs.list_prefix(pred.uri))
+            if uri.endswith("/"):
+                total = sum(o["size"] for o in gcs.list_prefix(uri))
+            else:
+                total = gcs.object_size(uri)
         except AuditError:
             return None
     return total / 1e9 or None
@@ -432,7 +436,7 @@ def _build_plan(args: argparse.Namespace, record=None, manifest=None):
                 else (getattr(args, "run", None) or (manifest.run if manifest else ""))
             ),
             extra_args=getattr(args, "extra", None) or [],
-            checkpoint_gb=_checkpoint_gb(ctx),
+            checkpoint_gb=_checkpoint_gb(ctx, unit),
             host_gb=doctor._memory_gb(),
             in_memory=getattr(args, "in_memory", False),
         ),

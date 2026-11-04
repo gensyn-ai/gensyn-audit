@@ -62,3 +62,12 @@ def test_in_memory_below_400_gib_warns(monkeypatch):
     monkeypatch.setattr(doctor, "_memory_gb", lambda: 96.0)
     check = doctor._check_memory(_interval(), "cuda", checkpoint_gb=96.4)
     assert check.status == doctor.WARN and not check.blocking
+
+
+@pytest.mark.parametrize("have, status", [(24, doctor.FAIL), (48, doctor.PASS)])
+def test_large_checkpoint_on_mps_needs_unified_memory_and_quotes_mac_timing(monkeypatch, have, status):
+    monkeypatch.setattr(doctor, "_memory_gb", lambda: float(have))
+    check = doctor._check_memory(_interval(), "mps", checkpoint_gb=96.4, streaming=True)
+    assert check.status == status
+    if status == doctor.PASS:
+        assert "16h44m" in check.fix

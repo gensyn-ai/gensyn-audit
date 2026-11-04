@@ -419,3 +419,15 @@ def test_fetch_minimal_only_with_gcs_root_and_mps_streams(kit_dir, tmp_path):
     bare = replace(unit, gcs_root=None)
     argv = _plan(kit_dir, tmp_path, unit=bare, device="cuda", checkpoint_gb=96.4, host_gb=96).argv()
     assert "--stream" in argv and "--fetch-minimal" not in argv
+
+
+def test_checkpoint_gb_sizes_a_single_object_handoff_and_skips_genesis(monkeypatch):
+    from types import SimpleNamespace as NS
+
+    from gensyn_audit import cli, gcs
+
+    ctx = NS(predecessor=NS(artifact_files=[], uri="gs://b/ckpt/other/"))
+    unit = NS(is_genesis=False, checkpoint_uri="gs://b/handoffs/step_1/handoff.safetensors")
+    monkeypatch.setattr(gcs, "object_size", lambda uri: 96_400_000_000)
+    assert cli._checkpoint_gb(ctx, unit) == 96.4
+    assert cli._checkpoint_gb(ctx, NS(is_genesis=True, checkpoint_uri=None)) is None
