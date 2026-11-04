@@ -65,6 +65,13 @@ _LARGE_TIMING = (
     "about 1h55m)."
 )
 
+#: A streamed genesis step (`--stream --from-init`) reads no checkpoint in
+#: place: the regenerated master and zero moments are written to the scratch
+#: dir, beside the accumulators and fold partials. audit_replay's own preflight
+#: (scratch_bytes_needed, copied layout) puts that at 243 GB for 8B's 96.4 GB
+#: checkpoints, all on disk. An estimate until a full-size run is measured.
+_GENESIS_STREAM_SCRATCH_RATIO = 2.53
+
 #: The genesis step downloads no predecessor (the start state is regenerated),
 #: so the ~19-26 GB an ordinary interval spends on one is not needed. What
 #: remains is the shards the first step consumes, the hand-off it writes, and
@@ -215,11 +222,21 @@ def _is_large(checkpoint_gb: float | None) -> bool:
     return checkpoint_gb is not None and checkpoint_gb >= LARGE_CHECKPOINT_GB
 
 
-def _check_large_cuda_memory(streaming: bool) -> Check:
+def _check_large_cuda_memory(streaming: bool, *, genesis: bool = False) -> Check:
     host = _memory_gb()
     if host is None:
         return Check("memory", WARN, "unknown", "could not read physical memory")
     value = f"{host:.0f} GiB host"
+    if genesis and not streaming:
+        # From init the optimizer cannot be offloaded, so the fp32 master and
+        # moments sit on the device at once: 96 GB at 8B, over any one card.
+        return Check(
+            "memory",
+            FAIL,
+            value,
+            note="in-memory from-init holds the fp32 master and AdamW moments at once",
+            fix="Drop --in-memory: the first step of a run this size only fits streamed.",
+        )
     note = (
         f"--stream: host ~{_LARGE_STREAM_HOST_GIB:.0f} GiB peak, GPU ~21 GB peak"
         if streaming
@@ -251,10 +268,11 @@ def _check_memory(
     checkpoint_gb: float | None = None,
     streaming: bool = False,
 ) -> Check:
+    if device in ("cuda", "mps") and _is_large(checkpoint_gb):
+        # Genesis included: streamed, it holds no more than a later step.
+        return _check_large_cuda_memory(streaming, genesis=unit.is_genesis)
     if unit.is_genesis:
         return _check_genesis_memory(device, venv)
-    if device in ("cuda", "mps") and _is_large(checkpoint_gb):
-        return _check_large_cuda_memory(streaming)
     if device != "mps":
         return Check("memory", SKIP, "n/a")
     have = _memory_gb()
@@ -331,6 +349,14 @@ def _check_disk(
         need = _KIT_DISK_GB
     elif unit.is_genesis:
         need = _KIT_DISK_GB + _GENESIS_DISK_GB
+        if checkpoint_gb:
+            # No predecessor download; the hand-off at checkpoint size, plus
+            # the streamed start state, which nothing is read in place for.
+            need = max(
+                need,
+                _KIT_DISK_GB
+                + checkpoint_gb * (1 + (_GENESIS_STREAM_SCRATCH_RATIO if streaming else 0)),
+            )
     else:
         need = _KIT_DISK_GB + _INTERVAL_DISK_GB
         if checkpoint_gb:

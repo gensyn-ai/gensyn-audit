@@ -65,6 +65,18 @@ Two differences are worth knowing before you claim it:
   smaller than an ordinary interval's: the shards the first step consumes, the
   hand-off it writes, and the kit.
 
+**On an 8B-class run the first step streams.** The in-memory from-init
+replay of an 8B model holds the fp32 master and AdamW moments (96 GB) at once.
+When the run's checkpoints are that size (the tool sizes them from the
+descriptor's listing) and the host has under 400 GiB, `run` adds `--stream`,
+and the kit's `audit_replay` regenerates the initialization into the stream
+scratch one parameter at a time. Memory is then what any streamed 8B step
+needs; preflight applies that check instead of the 48 GiB floor, and refuses
+`--in-memory` for this step. Disk is the hand-off plus the regenerated state
+(about 3.5x the checkpoint size, ~346 GB at 8B); nothing is downloaded for it.
+This needs a kit whose `audit_replay` accepts `--stream --from-init`; an older
+one stops with "--stream does not support --from-init yet" before replaying.
+
 Step-0 runtime and peak memory are not measured yet. Ordinary interval timings
 below do not establish either for this path. Before public enablement, validate
 the real first update, upload and fresh-download its handoff, reconstruct the

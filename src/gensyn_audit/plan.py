@@ -482,8 +482,15 @@ def build(
             "from: the initial weights are regenerated from the published seed "
             "and compared against the run's own init hash before the replay "
             "begins. Nothing but a few kilobytes of descriptor is downloaded "
-            "for the start state, and the optimizer offload is unavailable on "
-            "this path, so it needs more memory than a later step."
+            "for the start state, and "
+            + (
+                "it is regenerated into the stream scratch one parameter at a "
+                "time, so it needs no more memory than a later step but more "
+                "scratch disk: nothing is read in place from a checkpoint."
+                if plan.streaming
+                else "the optimizer offload is unavailable on this path, so it "
+                "needs more memory than a later step."
+            )
         )
     if unit.is_init:
         plan.notes.append(

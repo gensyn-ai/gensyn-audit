@@ -378,6 +378,17 @@ def _checkpoint_gb(ctx) -> float | None:
     if not ctx:
         return None
     pred = ctx.predecessor
+    if pred.genesis is not None:
+        # Nothing is downloaded for the run's first step, but the state it
+        # regenerates is the size of the run's checkpoints, and the descriptor
+        # is one: its listing sizes the replay (and decides whether it streams).
+        uri = pred.genesis.descriptor_uri
+        if not uri.startswith("gs://"):
+            return None
+        try:
+            return sum(o["size"] for o in gcs.list_prefix(uri)) / 1e9 or None
+        except AuditError:
+            return None
     total = sum(f.bytes for f in pred.artifact_files)
     if not total and pred.uri and pred.uri.startswith("gs://"):
         try:
