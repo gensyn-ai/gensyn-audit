@@ -70,6 +70,13 @@ _LARGE_TIMING = (
     "about 1h55m)."
 )
 
+#: A streamed genesis step (`--stream --from-init`) reads no checkpoint in
+#: place: the regenerated master and zero moments are written to the scratch
+#: dir, beside the accumulators and fold partials. audit_replay's own preflight
+#: (scratch_bytes_needed, copied layout) puts that at 243 GB for 8B's 96.4 GB
+#: checkpoints, all on disk. An estimate until a full-size run is measured.
+_GENESIS_STREAM_SCRATCH_RATIO = 2.53
+
 #: The genesis step downloads no predecessor (the start state is regenerated),
 #: so the ~19-26 GB an ordinary interval spends on one is not needed. What
 #: remains is the shards the first step consumes, the hand-off it writes, and
@@ -238,6 +245,34 @@ def _check_large_mps_memory() -> Check:
     return Check("memory", PASS, value, note=note, fix=_LARGE_MPS_TIMING)
 
 
+#: An in-memory from-init replay of an 8B-class run cannot offload: the fp32
+#: master (4 B/param) and AdamW moments (8 B/param) are resident together, 96 GB
+#: at 8B, before the bf16 grad model, gradients and fold. Unmeasured; on Apple
+#: silicon below this the replay cannot fit at all.
+_LARGE_GENESIS_IN_MEMORY_GIB = 192.0
+
+
+def _check_large_genesis_in_memory(device: str) -> Check:
+    """`--in-memory` on the first step of an 8B-class run. The plan streams it
+    otherwise, on any host: from init there is no offload, so host RAM does not
+    help the card, and the in-memory path is unmeasured everywhere."""
+    host = _memory_gb()
+    note = (
+        "in-memory from-init cannot offload: the fp32 master and AdamW moments "
+        "(96 GB at 8B) are resident together"
+    )
+    fix = "Run without --in-memory: the tool streams this step."
+    if device == "cuda":
+        value = "unknown" if host is None else f"{host:.0f} GiB host"
+        return Check("memory", FAIL, value, note=note + ", on one card", fix=fix)
+    if host is None:
+        return Check("memory", WARN, "unknown", "could not read physical memory", fix=fix)
+    value = f"{host:.0f} GiB unified memory"
+    if host < _LARGE_GENESIS_IN_MEMORY_GIB:
+        return Check("memory", FAIL, value, note=note, fix=fix)
+    return Check("memory", WARN, value, note=note + "; not measured on any Mac", fix=fix)
+
+
 def _check_large_cuda_memory(streaming: bool) -> Check:
     host = _memory_gb()
     if host is None:
@@ -274,10 +309,13 @@ def _check_memory(
     checkpoint_gb: float | None = None,
     streaming: bool = False,
 ) -> Check:
+    if device in ("cuda", "mps") and _is_large(checkpoint_gb):
+        # Genesis included: streamed, it holds no more than a later step.
+        if unit.is_genesis and not streaming:
+            return _check_large_genesis_in_memory(device)
+        return _check_large_mps_memory() if device == "mps" else _check_large_cuda_memory(streaming)
     if unit.is_genesis:
         return _check_genesis_memory(device, venv)
-    if device in ("cuda", "mps") and _is_large(checkpoint_gb):
-        return _check_large_mps_memory() if device == "mps" else _check_large_cuda_memory(streaming)
     if device != "mps":
         return Check("memory", SKIP, "n/a")
     have = _memory_gb()
@@ -354,6 +392,14 @@ def _check_disk(
         need = _KIT_DISK_GB
     elif unit.is_genesis:
         need = _KIT_DISK_GB + _GENESIS_DISK_GB
+        if checkpoint_gb:
+            # No predecessor download; the hand-off at checkpoint size, plus
+            # the streamed start state, which nothing is read in place for.
+            need = max(
+                need,
+                _KIT_DISK_GB
+                + checkpoint_gb * (1 + (_GENESIS_STREAM_SCRATCH_RATIO if streaming else 0)),
+            )
     else:
         need = _KIT_DISK_GB + _INTERVAL_DISK_GB
         if checkpoint_gb:

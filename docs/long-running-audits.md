@@ -65,6 +65,20 @@ Two differences are worth knowing before you claim it:
   smaller than an ordinary interval's: the shards the first step consumes, the
   hand-off it writes, and the kit.
 
+**On an 8B-class run the first step streams.** The in-memory from-init
+replay of an 8B model holds the fp32 master and AdamW moments (96 GB) at once.
+When the run's checkpoints are that size (the tool sizes them from the
+descriptor's listing), `run` adds `--stream` on any host: from init nothing
+can be offloaded, so host RAM does not make the in-memory replay fit. The kit's
+`audit_replay` then regenerates the initialization into the stream scratch one
+parameter at a time. Memory is what any streamed 8B step needs, and preflight
+applies that check instead of the 48 GiB floor. Passing `--in-memory` opts out:
+preflight then fails it on CUDA (96 GB of master and moments on one card), and
+on a Mac fails it under 192 GiB and warns above that, since it is unmeasured. Disk is the hand-off plus the regenerated state
+(about 3.5x the checkpoint size, ~346 GB at 8B); nothing is downloaded for it.
+This needs a kit whose `audit_replay` accepts `--stream --from-init`; an older
+one stops with "--stream does not support --from-init yet" before replaying.
+
 Step-0 runtime and peak memory are not measured yet. Ordinary interval timings
 below do not establish either for this path. Before public enablement, validate
 the real first update, upload and fresh-download its handoff, reconstruct the

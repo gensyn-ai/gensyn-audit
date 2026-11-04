@@ -368,16 +368,36 @@ def _workdir(args: argparse.Namespace, unit: kitmod.Unit) -> Path:
     return Path.cwd() / f"audit-{slug}"
 
 
+def _genesis_state_gb(unit) -> float | None:
+    """Size in decimal GB of the state a genesis step regenerates, or None.
+
+    Nothing is downloaded for the run's first step, but the state it rebuilds
+    is the size of the run's checkpoints, and its descriptor (the unit's
+    `checkpoint_uri`) is one: the listing sizes the replay and decides whether
+    it streams. Unreachable or not on GCS means "unknown".
+    """
+    uri = unit.checkpoint_uri
+    if not uri or not uri.startswith("gs://"):
+        return None
+    try:
+        return sum(o["size"] for o in gcs.list_prefix(uri)) / 1e9 or None
+    except AuditError:
+        return None
+
+
 def _checkpoint_gb(ctx, unit) -> float | None:
     """Size in decimal GB of the checkpoint the replay downloads, or None when unknown.
 
     The record's per-file sizes when it publishes them; otherwise GCS: the
     listing of a directory URI, or the metadata of a single-object crowd
-    hand-off. Genesis downloads none. An unreachable bucket is not fatal:
+    hand-off. Genesis downloads none, so it is sized by the state it
+    regenerates (`_genesis_state_gb`). An unreachable bucket is not fatal:
     it means "unknown".
     """
-    if not ctx or unit.is_genesis:
+    if not ctx:
         return None
+    if unit.is_genesis:
+        return _genesis_state_gb(unit)
     total = sum(f.bytes for f in ctx.predecessor.artifact_files)
     uri = unit.checkpoint_uri or ctx.predecessor.uri
     if not total and uri and uri.startswith("gs://"):
@@ -1439,7 +1459,8 @@ def _not_published_yet(uri: str | None) -> AuditError:
         "auditor's upload, which stays quarantined until it passes the\n"
         "loss and digest checks. Re-check the step, or take one whose\n"
         "predecessor is already published:\n"
-        "  a position-1 step is one where the audit step divides by 100.",
+        "  a position-1 step is the first of its segment (a multiple of the\n"
+        "  run's segment length: 100 on open-1b, 500 on open-8b).",
     )
 
 
