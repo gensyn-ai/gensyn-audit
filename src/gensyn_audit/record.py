@@ -482,6 +482,10 @@ _ERROR_GUIDANCE = {
     "uploads_unconfigured": "The record cannot accept uploads yet (the intake "
     "bucket is not configured). Your result is already "
     "recorded; only the hand-off is missing.",
+    "not_published": "The run is still training, and the record opens a segment only "
+    "once its starting checkpoint and commitments are published. Nothing "
+    "is wrong with this machine or this tool. Pick a step in a segment "
+    "the web app shows as open, or come back once this one is published.",
 }
 
 
@@ -497,6 +501,20 @@ def _api_error(exc: urllib.error.HTTPError, method: str, path: str) -> AuditErro
     hint = _ERROR_GUIDANCE.get(code, "")
     if code == "rate_limited" and doc.get("retry_after"):
         hint += f" Retry after {doc['retry_after']}s."
+    if code == "not_published":
+        # A run that is still training: the record's 404 (a receipt, segment or
+        # anchor) and 409 (a claim) past the published segments. Said as what
+        # it is, not as a refusal that reads like a broken request.
+        segment, published = doc.get("segment"), doc.get("publishedSegments")
+        where = (
+            f": segment {segment} is past the {published} published so far"
+            if isinstance(segment, int) and isinstance(published, int)
+            else ""
+        )
+        return AuditError(
+            f"that step is not open to audit yet{where}.",
+            hint=(hint + ("\n" + detail if detail else "")).strip(),
+        )
     return AuditError(
         f"{method} {path} was refused ({exc.code}" + (f" {code}" if code else "") + ").",
         hint=(hint + ("\n" + detail if detail and hint else detail)).strip() or None,
