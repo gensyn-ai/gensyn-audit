@@ -454,19 +454,27 @@ def build(
         and not unit.is_init
         and checkpoint_gb is not None
         and checkpoint_gb >= LARGE_CHECKPOINT_GB
-        and host_gb is not None
-        and host_gb < IN_MEMORY_HOST_GB
+        # From init nothing can be offloaded, so a big host does not make the
+        # in-memory replay fit the card: the first step streams on any host.
+        and (unit.is_genesis or (host_gb is not None and host_gb < IN_MEMORY_HOST_GB))
         and "--stream" not in plan.extra_args
     ):
         # audit_replay rejects --fetch-minimal without --gcs-root.
         added = ["--stream"] + (["--fetch-minimal"] if unit.gcs_root else [])
         plan.extra_args = [*added, *plan.extra_args]
-        plan.notes.append(
-            f"This machine has {host_gb:.0f} GiB of host RAM, under the "
-            f"{IN_MEMORY_HOST_GB:.0f} GiB an in-memory replay of a checkpoint this "
-            f"size was run with, so {' '.join(added)} added. Streaming is "
-            "about 4.5x slower per micro-batch. Pass --in-memory to refuse it."
-        )
+        if unit.is_genesis:
+            plan.notes.append(
+                f"This run's state is {checkpoint_gb:.0f} GB, and from init the "
+                f"optimizer cannot be offloaded, so {' '.join(added)} added on any "
+                "host. Pass --in-memory to refuse it."
+            )
+        else:
+            plan.notes.append(
+                f"This machine has {host_gb:.0f} GiB of host RAM, under the "
+                f"{IN_MEMORY_HOST_GB:.0f} GiB an in-memory replay of a checkpoint this "
+                f"size was run with, so {' '.join(added)} added. Streaming is "
+                "about 4.5x slower per micro-batch. Pass --in-memory to refuse it."
+            )
 
     if unit.descriptor_uri:
         plan.notes.append(
@@ -482,8 +490,15 @@ def build(
             "from: the initial weights are regenerated from the published seed "
             "and compared against the run's own init hash before the replay "
             "begins. Nothing but a few kilobytes of descriptor is downloaded "
-            "for the start state, and the optimizer offload is unavailable on "
-            "this path, so it needs more memory than a later step."
+            "for the start state, and "
+            + (
+                "it is regenerated into the stream scratch one parameter at a "
+                "time, so it needs no more memory than a later step but more "
+                "scratch disk: nothing is read in place from a checkpoint."
+                if plan.streaming
+                else "the optimizer offload is unavailable on this path, so it "
+                "needs more memory than a later step."
+            )
         )
     if unit.is_init:
         plan.notes.append(

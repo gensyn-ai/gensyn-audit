@@ -364,3 +364,15 @@ def test_an_unparsable_start_does_not_crash_status():
 
     for bad in ("", "not-a-date", None):
         assert (time.monotonic() - cli._elapsed_origin(bad)) < 1.0
+
+
+def test_completion_banner_names_the_run():
+    from gensyn_audit import brand
+
+    assert brand.run_label("open-8b") == "Open 8B"
+    assert brand.run_label("open-1b") == "Open 1B"
+    plain = "\n".join(brand.completion_banner(plain=True, run="Open 8B"))
+    assert "Thank you for helping audit Open 8B." in plain
+    assert "Open 1B" not in plain
+    assert brand.THANKS.search(plain).group(1) == "Open 8B"
+    assert "audit this run." in "\n".join(brand.completion_banner(plain=True))
