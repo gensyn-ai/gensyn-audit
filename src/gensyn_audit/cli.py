@@ -1630,7 +1630,8 @@ def _submit_and_upload(
             and not record.is_mock
             and response.verify_mode != "mock"
         ):
-            for line in brand.completion_banner():
+            run = _run_label(record)
+            for line in brand.completion_banner(run=run):
                 echo(line)
             if response.receipt_url:
                 echo(kv("follow verification", response.receipt_url))
@@ -2188,6 +2189,14 @@ def _follow_supervisor(workdir, state) -> None:
     _echo_supervisor_report(workdir)
 
 
+def _run_label(record) -> str:
+    """The run's display name for the banner; blank when the record can't say."""
+    try:
+        return brand.run_label(record.manifest().run_name)
+    except (AuditError, AttributeError, OSError, ValueError):  # never fail on a banner
+        return ""
+
+
 def _echo_supervisor_report(workdir, *, completion_only: bool = False) -> None:
     """Render the saved report for this terminal without changing the log."""
     if not workdir.cli_log.is_file():
@@ -2204,13 +2213,16 @@ def _echo_supervisor_report(workdir, *, completion_only: bool = False) -> None:
         default=0,
     )
     report = "\n".join(lines[start:])
-    plain = "\n".join(brand.completion_banner(plain=True))
+    # The banner names the run; rebuild it with the name the log recorded.
+    named = brand.THANKS.search(report)
+    run = named.group(1) if named else ""
+    plain = "\n".join(brand.completion_banner(plain=True, run=run))
     if completion_only:
         start = report.find(plain)
         if start < 0:
             return
         report = report[start:]
-    echo(report.replace(plain, "\n".join(brand.completion_banner())))
+    echo(report.replace(plain, "\n".join(brand.completion_banner(run=run))))
 
 
 def cmd_stop(args: argparse.Namespace) -> int:

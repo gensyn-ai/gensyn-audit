@@ -16,6 +16,8 @@ is too narrow to hold it.
 
 from __future__ import annotations
 
+import re
+
 from . import __version__
 from .ui import PASS, WARN, color_enabled, paint, width
 
@@ -66,8 +68,22 @@ def banner(*, force: bool | None = None) -> list[str]:
     ]
 
 
-def completion_banner(*, plain: bool = False) -> list[str]:
-    """A matched audit submitted with its hand-off, not server acceptance."""
+def run_label(run_name: str) -> str:
+    """Display a record's run name: ``open-8b`` becomes ``Open 8B``."""
+    words = [w for w in run_name.replace("_", "-").split("-") if w]
+    return " ".join(
+        w.upper() if w[:-1].isdigit() and w[-1:].isalpha() else w.capitalize() for w in words
+    )
+
+
+THANKS = re.compile(r"Thank you for helping audit (.+)\.$", re.MULTILINE)
+
+
+def completion_banner(*, plain: bool = False, run: str = "") -> list[str]:
+    """A matched audit submitted with its hand-off, not server acceptance.
+
+    ``run`` is the display name (``Open 8B``); the CLI serves more than one run.
+    """
 
     def style(text: str, *styles: str) -> str:
         return text if plain else paint(text, *styles)
@@ -83,7 +99,7 @@ def completion_banner(*, plain: bool = False) -> list[str]:
         style("  AUDIT MATCHED. CONTRIBUTION SUBMITTED.", "green", "bold"),
         "",
         "  You independently reproduced a published training-state hash.",
-        "  Thank you for helping audit Open 1B.",
+        f"  Thank you for helping audit {run or 'this run'}.",
         "",
         style(f"  {PASS} Audit matched", "green"),
         style(f"  {PASS} Submission recorded", "green"),
